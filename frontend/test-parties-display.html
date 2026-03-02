@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试 Parties 显示</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .test-case { margin: 20px 0; padding: 15px; border: 1px solid #ccc; }
+        .label { color: #666; font-size: 14px; }
+        .value { font-weight: 500; margin: 5px 0; }
+    </style>
+</head>
+<body>
+    <h1>Parties 字段显示测试</h1>
+    
+    <div class="test-case">
+        <h3>测试案例 1: 三方合同（数组格式）</h3>
+        <div id="test1"></div>
+    </div>
+    
+    <div class="test-case">
+        <h3>测试案例 2: 三方合同（JSON字符串）</h3>
+        <div id="test2"></div>
+    </div>
+    
+    <div class="test-case">
+        <h3>测试案例 3: 双方合同</h3>
+        <div id="test3"></div>
+    </div>
+
+    <script>
+        // 模拟 getPartyInfo 函数
+        function getPartyInfo(parties) {
+            let partyList = [];
+            
+            if (typeof parties === 'string') {
+                try {
+                    const parsed = JSON.parse(parties);
+                    partyList = Array.isArray(parsed) ? parsed : [parties];
+                } catch {
+                    partyList = parties.split(',').map(p => p.trim());
+                }
+            } else if (Array.isArray(parties)) {
+                partyList = parties.map(p => String(p));
+            } else if (parties) {
+                partyList = [String(parties)];
+            }
+
+            // 过滤掉空值、null、待填写等无效值
+            partyList = partyList.filter(p => {
+                const str = String(p).trim();
+                return str && str !== 'null' && str !== '待填写' && str !== 'undefined';
+            });
+
+            const partyA = partyList[0] || '';
+            const partyB = partyList[1] || '';
+            const partyC = partyList[2] || '';
+            const other = partyList.slice(3);
+
+            return { partyA, partyB, partyC, other };
+        }
+
+        // 测试案例 1: 数组格式
+        const test1Data = ['瑞铎商业保理（深圳）有限公司', '引力商业保理有限公司', '肖华'];
+        const result1 = getPartyInfo(test1Data);
+        document.getElementById('test1').innerHTML = `
+            <p class="label">输入数据: ${JSON.stringify(test1Data)}</p>
+            ${result1.partyA ? `<p class="value">甲方：${result1.partyA}</p>` : ''}
+            ${result1.partyB ? `<p class="value">乙方：${result1.partyB}</p>` : ''}
+            ${result1.partyC ? `<p class="value">丙方：${result1.partyC}</p>` : ''}
+        `;
+
+        // 测试案例 2: JSON字符串
+        const test2Data = '["瑞铎商业保理（深圳）有限公司", "引力商业保理有限公司", "肖华"]';
+        const result2 = getPartyInfo(test2Data);
+        document.getElementById('test2').innerHTML = `
+            <p class="label">输入数据: ${test2Data}</p>
+            ${result2.partyA ? `<p class="value">甲方：${result2.partyA}</p>` : ''}
+            ${result2.partyB ? `<p class="value">乙方：${result2.partyB}</p>` : ''}
+            ${result2.partyC ? `<p class="value">丙方：${result2.partyC}</p>` : ''}
+        `;
+
+        // 测试案例 3: 双方合同
+        const test3Data = ['碧江信息技术（广州）有限公司', '中国联合网络通信有限公司佛山市分公司'];
+        const result3 = getPartyInfo(test3Data);
+        document.getElementById('test3').innerHTML = `
+            <p class="label">输入数据: ${JSON.stringify(test3Data)}</p>
+            ${result3.partyA ? `<p class="value">甲方：${result3.partyA}</p>` : ''}
+            ${result3.partyB ? `<p class="value">乙方：${result3.partyB}</p>` : ''}
+            ${result3.partyC ? `<p class="value">丙方：${result3.partyC}</p>` : ''}
+        `;
+    </script>
+</body>
+</html>

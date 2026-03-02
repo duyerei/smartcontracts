@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/* 容器基础样式 */
+.ai-analyzing-card {
+  position: relative;
+  border-radius: 8px;
+  background: #fff;
+  padding: 20px;
+  border: 1px solid #e5e7eb; /* 默认边框 */
+  overflow: hidden;
+  z-index: 0;
+}
+
+/* 激活解析状态时的动效 */
+.ai-analyzing-card.is-loading::before {
+  content: "";
+  position: absolute;
+  inset: -2px; /* 略大于容器，形成边框感 */
+  z-index: -1;
+  /* 圆锥渐变形成流光效果 */
+  background: conic-gradient(
+    from 0deg,
+    transparent 0%,
+    transparent 70%,
+    #4F46E5 90%,
+    #22D3EE 100%
+  );
+  animation: rotate 2s linear infinite;
+}
+
+/* 利用 mask 遮罩只保留边框部分 */
+.ai-analyzing-card.is-loading::after {
+  content: "";
+  position: absolute;
+  inset: 1px; /* 露出的边框宽度 */
+  background: white;
+  border-radius: 7px;
+  z-index: -1;
+}
+
+/* 旋转动画 */
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 呼吸动画 */
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(79, 70, 229, 0.1); }
+  50% { box-shadow: 0 0 25px rgba(79, 70, 229, 0.4); }
+}
+
+/* 外发光呼吸效果 */
+.ai-analyzing-card.is-loading {
+  animation: glow-pulse 2s ease-in-out infinite;
+  border-color: transparent; /* 隐藏原边框 */
+  transition: all 0.3s;
+}
+

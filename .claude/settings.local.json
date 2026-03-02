@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(python:*)",
+      "Bash(npm run dev)",
+      "Bash(curl:*)",
+      "Bash(netstat -ano:*)",
+      "Bash(echo:*)",
+      "WebFetch(domain:cloud.baidu.com)",
+      "WebSearch",
+      "WebFetch(domain:aip.baidubce.com)",
+      "WebFetch(domain:console.bce.baidu.com)"
+    ]
+  }
+}

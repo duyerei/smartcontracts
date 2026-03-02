@@ -1,0 +1,5 @@
+{
+  "name": "AI Analyzing Card Demo",
+  "description": "A demonstration of a card component with a rotating conic-gradient border animation for AI processing states.",
+  "requestFramePermissions": []
+}
