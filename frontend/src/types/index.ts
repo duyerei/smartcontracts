@@ -43,6 +43,18 @@ export interface Contract {
   riskLevel?: 'low' | 'medium' | 'high'
   summary?: string
   riskAnalysis?: string
+  extractedData?: string
+  // OA系统字段
+  source?: string
+  oaId?: string
+  applicant?: string
+  position?: string
+  company?: string
+  counterparty?: string
+  counterpartyContact?: string
+  counterpartyAddress?: string
+  paymentType?: string
+  copies?: string
 }
 
 export interface ContractStats {

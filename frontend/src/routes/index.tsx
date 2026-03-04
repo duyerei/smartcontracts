@@ -4,10 +4,13 @@ import { Dashboard } from '@/pages/Dashboard'
 import { ContractList } from '@/pages/ContractList'
 import { ContractDetail } from '@/pages/ContractDetail'
 import { UploadContract } from '@/pages/UploadContract'
+import ImportContracts from '@/pages/ImportContracts'
 import { Search } from '@/pages/Search'
 import { SettingsPage } from '@/pages/Settings'
 import { Login } from '@/pages/Login'
 import { UserManagement } from '@/pages/UserManagement'
+import { PaymentManagementList } from '@/pages/PaymentManagementList'
+import { PaymentManagementDetail } from '@/pages/PaymentManagementDetail'
 import { useAuth } from '@/contexts/AuthContext'
 import type { ReactNode } from 'react'
 
@@ -57,6 +60,10 @@ const routes = [
         element: <UploadContract />,
       },
       {
+        path: 'import',
+        element: <RequireAdmin><ImportContracts /></RequireAdmin>,
+      },
+      {
         path: 'search',
         element: <Search />,
       },
@@ -67,6 +74,14 @@ const routes = [
       {
         path: 'users',
         element: <RequireAdmin><UserManagement /></RequireAdmin>,
+      },
+      {
+        path: 'payments',
+        element: <PaymentManagementList />,
+      },
+      {
+        path: 'payments/:id',
+        element: <PaymentManagementDetail />,
       },
     ],
   },

@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react'
-import { Upload, FileText, Trash2, Edit, Image } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { Upload, FileText, Trash2, Edit, Image, Link2, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
 
 interface Payment {
   id: number
@@ -12,9 +13,20 @@ interface Payment {
   description: string
   payment_date: string | null
   amount: number | null
-  file_path: string
-  file_size: number
+  file_path: string | null
+  file_size: number | null
   created_at: string
+}
+
+interface PaymentSearchResult {
+  id: number
+  payment_theme: string
+  payment_date: string | null
+  amount: number | null
+  operator: string | null
+  contract_number: string | null
+  application_number: string | null
+  contract_id: number | null
 }
 
 interface PaymentListProps {
@@ -26,6 +38,7 @@ export function PaymentList({ contractId }: PaymentListProps) {
   const [loading, setLoading] = useState(false)
   const [showUploadDialog, setShowUploadDialog] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
+  const [showLinkDialog, setShowLinkDialog] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [editingPayment, setEditingPayment] = useState<Payment | null>(null)
   const [editForm, setEditForm] = useState({
@@ -33,6 +46,10 @@ export function PaymentList({ contractId }: PaymentListProps) {
     paymentDate: '',
     amount: ''
   })
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<PaymentSearchResult[]>([])
+  const [searching, setSearching] = useState(false)
+  const [linking, setLinking] = useState(false)
 
   // 判断是否超时（创建时间超过2分钟）
   const isRecognitionTimeout = (createdAt: string) => {
@@ -71,6 +88,56 @@ export function PaymentList({ contractId }: PaymentListProps) {
       console.error('加载付款记录失败:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const searchPayments = useCallback(async (query: string) => {
+    setSearching(true)
+    try {
+      const token = localStorage.getItem('token')
+      const params = new URLSearchParams({ q: query, exclude_contract_id: String(contractId), page_size: '20' })
+      const response = await fetch(`/api/v1/payments/search?${params}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setSearchResults(data.payments || [])
+      }
+    } catch (error) {
+      console.error('搜索付款记录失败:', error)
+    } finally {
+      setSearching(false)
+    }
+  }, [contractId])
+
+  useEffect(() => {
+    if (!showLinkDialog) return
+    const timer = setTimeout(() => searchPayments(searchQuery), 400)
+    return () => clearTimeout(timer)
+  }, [searchQuery, searchPayments, showLinkDialog])
+
+  const handleLink = async (paymentId: number) => {
+    setLinking(true)
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/v1/payments/${contractId}/link`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payment_id: paymentId })
+      })
+      if (response.ok) {
+        setShowLinkDialog(false)
+        setSearchQuery('')
+        setSearchResults([])
+        loadPayments()
+      } else {
+        const err = await response.json()
+        alert(err.detail || '关联失败')
+      }
+    } catch {
+      alert('关联失败')
+    } finally {
+      setLinking(false)
     }
   }
 
@@ -234,7 +301,8 @@ export function PaymentList({ contractId }: PaymentListProps) {
     return dateStr.split('T')[0]
   }
 
-  const getFileIcon = (filePath: string) => {
+  const getFileIcon = (filePath: string | null) => {
+    if (!filePath) return <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
     const ext = filePath.split('.').pop()?.toLowerCase()
     if (['jpg', 'jpeg', 'png'].includes(ext || '')) {
       return <Image className="h-4 w-4 text-muted-foreground flex-shrink-0" />
@@ -242,7 +310,8 @@ export function PaymentList({ contractId }: PaymentListProps) {
     return <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
   }
 
-  const getFileExtension = (filePath: string) => {
+  const getFileExtension = (filePath: string | null) => {
+    if (!filePath) return ''
     const match = filePath.match(/\.[^.]+$/)
     return match ? match[0] : ''
   }
@@ -251,10 +320,16 @@ export function PaymentList({ contractId }: PaymentListProps) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>付款管理</CardTitle>
-        <Button variant="outline" size="sm" onClick={() => setShowUploadDialog(true)}>
-          <Upload className="h-4 w-4 mr-2" />
-          上传付款凭证
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => { setShowLinkDialog(true); searchPayments('') }}>
+            <Link2 className="h-4 w-4 mr-2" />
+            关联付款记录
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setShowUploadDialog(true)}>
+            <Upload className="h-4 w-4 mr-2" />
+            上传付款凭证
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -283,12 +358,16 @@ export function PaymentList({ contractId }: PaymentListProps) {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         {getFileIcon(payment.file_path)}
-                        <button
-                          onClick={() => handlePreview(payment)}
-                          className="font-medium text-primary hover:underline text-left"
-                        >
-                          {payment.description}{getFileExtension(payment.file_path)}
-                        </button>
+                        {payment.file_path ? (
+                          <button
+                            onClick={() => handlePreview(payment)}
+                            className="font-medium text-primary hover:underline text-left"
+                          >
+                            {payment.description}{getFileExtension(payment.file_path)}
+                          </button>
+                        ) : (
+                          <span className="font-medium text-muted-foreground">{payment.description}</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">
@@ -426,6 +505,85 @@ export function PaymentList({ contractId }: PaymentListProps) {
             <Button onClick={handleSaveEdit}>
               保存
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 关联付款记录对话框 */}
+      <Dialog open={showLinkDialog} onOpenChange={(open) => {
+        setShowLinkDialog(open)
+        if (!open) { setSearchQuery(''); setSearchResults([]) }
+      }}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>关联付款记录</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                className="pl-9"
+                placeholder="搜索付款主题、申请编号、操作人..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="min-h-[200px] max-h-[360px] overflow-y-auto border rounded-lg">
+              {searching ? (
+                <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">搜索中...</div>
+              ) : searchResults.length === 0 ? (
+                <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
+                  {searchQuery ? '未找到匹配的付款记录' : '输入关键词搜索，或直接浏览最近记录'}
+                </div>
+              ) : (
+                <table className="w-full">
+                  <thead className="bg-muted sticky top-0">
+                    <tr>
+                      <th className="text-left px-4 py-2 font-medium text-sm">付款主题</th>
+                      <th className="text-left px-4 py-2 font-medium text-sm">付款时间</th>
+                      <th className="text-left px-4 py-2 font-medium text-sm">金额</th>
+                      <th className="text-left px-4 py-2 font-medium text-sm">状态</th>
+                      <th className="px-4 py-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {searchResults.map((p, i) => (
+                      <tr
+                        key={p.id}
+                        className={`border-t hover:bg-muted/50 transition-colors ${i % 2 === 0 ? 'bg-background' : 'bg-muted/20'}`}
+                      >
+                        <td className="px-4 py-3 text-sm">
+                          <div className="font-medium line-clamp-2">{p.payment_theme}</div>
+                          {p.application_number && (
+                            <div className="text-xs text-muted-foreground mt-0.5">{p.application_number}</div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
+                          {p.payment_date || '-'}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
+                          {p.amount ? new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(p.amount) : '-'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge variant="outline" className="text-xs whitespace-nowrap">
+                            {p.contract_id ? '已关联' : '未关联'}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          <Button size="sm" disabled={linking} onClick={() => handleLink(p.id)}>
+                            关联
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowLinkDialog(false)}>取消</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

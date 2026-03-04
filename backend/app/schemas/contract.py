@@ -36,6 +36,7 @@ class ContractResponse(BaseModel):
     parties: str
     amount: Optional[float] = None
     currency: str = "CNY"
+    signed_date: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     file_path: str
@@ -45,6 +46,7 @@ class ContractResponse(BaseModel):
     raw_text: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    source: Optional[str] = None
 
     class Config:
         from_attributes = True

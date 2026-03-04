@@ -114,3 +114,24 @@
   border-color: transparent; /* 隐藏原边框 */
   transition: all 0.3s;
 }
+
+/* docx-preview custom styles */
+.docx-preview-wrapper {
+  background-color: transparent !important;
+}
+
+.docx-preview-container {
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+  margin: 0 auto !important;
+  background-color: white !important;
+  border-radius: 4px !important;
+}
+
+.docx-wrapper {
+  background-color: transparent !important;
+  padding: 0 !important;
+}
+
+.docx {
+  margin-bottom: 0 !important;
+}

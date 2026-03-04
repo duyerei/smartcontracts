@@ -401,7 +401,229 @@ class BaiduOCR:
         elif ext in ['jpg', 'jpeg', 'png', 'bmp']:
             result = self.recognize_text(file_path)
             return result.get("text", "")
+        elif ext == 'docx':
+            return self._extract_text_from_docx(file_path)
+        elif ext == 'doc':
+            return self._extract_text_from_doc(file_path)
         else:
             return "不支持的文件格式"
+    
+    def _extract_text_from_doc(self, file_path: str) -> str:
+        """从旧版 .doc 文件提取文本
+        策略：先用 COM 接口将 .doc 转为 PDF，再走已有的 PDF 解析流程
+        优先级：WPS COM 转PDF → Word COM 转PDF → LibreOffice 转PDF
+        """
+        import os
+        import shutil
+        import tempfile
+        abs_path = os.path.abspath(file_path)
+        print(f"[DOC提取] 文件: {abs_path}")
+
+        pdf_path = self._convert_doc_to_pdf(abs_path)
+        if pdf_path:
+            try:
+                print(f"[DOC提取] 转PDF成功: {pdf_path}，开始解析PDF...")
+                text = self.recognize_pdf(pdf_path)
+                print(f"[DOC提取] PDF解析完成，文本长度: {len(text)}")
+                # 清理临时PDF
+                try:
+                    os.remove(pdf_path)
+                    os.rmdir(os.path.dirname(pdf_path))
+                except:
+                    pass
+                return text
+            except Exception as e:
+                print(f"[DOC提取] PDF解析失败: {e}")
+                try:
+                    os.remove(pdf_path)
+                    os.rmdir(os.path.dirname(pdf_path))
+                except:
+                    pass
+
+        return "无法解析 .doc 文件，请转换为 .docx 后重试"
+
+    def _convert_doc_to_pdf(self, abs_path: str) -> str:
+        """将 .doc 文件转换为 PDF，返回临时 PDF 路径，失败返回 None"""
+        import os
+        import shutil
+        import tempfile
+
+        # 方案1：WPS COM 转 PDF（优先，因为 WPS 更稳定）
+        try:
+            import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                wps = win32com.client.Dispatch("Kwps.Application")
+                wps.Visible = False
+                tmp_dir = tempfile.mkdtemp()
+                tmp_doc = os.path.join(tmp_dir, "temp_doc.doc")
+                tmp_pdf = os.path.join(tmp_dir, "temp_doc.pdf")
+                shutil.copy2(abs_path, tmp_doc)
+                doc = wps.Documents.Open(tmp_doc, ReadOnly=True)
+                # WPS SaveAs 格式17 = PDF
+                doc.SaveAs(tmp_pdf, FileFormat=17)
+                doc.Close(False)
+                wps.Quit()
+                if os.path.exists(tmp_pdf):
+                    print(f"[DOC转PDF] WPS COM 转换成功")
+                    return tmp_pdf
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"[DOC转PDF] WPS COM 失败: {e}")
+                try:
+                    wps.Quit()
+                except:
+                    pass
+            finally:
+                pythoncom.CoUninitialize()
+        except ImportError:
+            pass
+
+        # 方案2：Word COM (DispatchEx) 转 PDF
+        try:
+            import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                word = win32com.client.DispatchEx("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = 0
+                tmp_dir = tempfile.mkdtemp()
+                tmp_doc = os.path.join(tmp_dir, "temp_doc.doc")
+                tmp_pdf = os.path.join(tmp_dir, "temp_doc.pdf")
+                shutil.copy2(abs_path, tmp_doc)
+                doc = word.Documents.Open(tmp_doc, ReadOnly=True, ConfirmConversions=False)
+                # Word SaveAs2 格式17 = PDF
+                doc.SaveAs2(tmp_pdf, FileFormat=17)
+                doc.Close(False)
+                word.Quit()
+                if os.path.exists(tmp_pdf):
+                    print(f"[DOC转PDF] Word COM 转换成功")
+                    return tmp_pdf
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"[DOC转PDF] Word COM 失败: {e}")
+                try:
+                    word.Quit()
+                except:
+                    pass
+            finally:
+                pythoncom.CoUninitialize()
+        except ImportError:
+            pass
+
+        # 方案3：LibreOffice 转 PDF
+        try:
+            import subprocess
+            tmp_dir = tempfile.mkdtemp()
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "pdf", "--outdir", tmp_dir, abs_path],
+                capture_output=True, timeout=60
+            )
+            pdf_name = os.path.splitext(os.path.basename(abs_path))[0] + ".pdf"
+            pdf_path = os.path.join(tmp_dir, pdf_name)
+            if os.path.exists(pdf_path):
+                print(f"[DOC转PDF] LibreOffice 转换成功")
+                return pdf_path
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[DOC转PDF] LibreOffice 失败: {e}")
+
+        print(f"[DOC转PDF] 所有方案均失败")
+        return None
+
+    def _extract_text_from_doc(self, file_path: str) -> str:
+        """从旧版 .doc 文件提取文本
+        优先级：win32com DispatchEx → WPS COM → LibreOffice 转 docx
+        """
+        import os
+        abs_path = os.path.abspath(file_path)
+        print(f"[DOC提取] 文件: {abs_path}")
+
+        # 方案1：win32com DispatchEx（避免 Dispatch 的远程过程调用失败问题）
+        try:
+            import win32com.client
+            import pythoncom
+            import shutil
+            import tempfile
+            pythoncom.CoInitialize()
+            try:
+                word = win32com.client.DispatchEx("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = 0
+                # 复制到临时目录（避免中文/Unicode路径问题）
+                tmp_dir = tempfile.mkdtemp()
+                tmp_path = os.path.join(tmp_dir, "temp_doc.doc")
+                shutil.copy2(abs_path, tmp_path)
+                doc = word.Documents.Open(tmp_path, ReadOnly=True, ConfirmConversions=False)
+                text = doc.Content.Text
+                doc.Close(False)
+                word.Quit()
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                print(f"[DOC提取] win32com DispatchEx 成功，文本长度: {len(text)}")
+                return text
+            except Exception as e:
+                print(f"[DOC提取] win32com DispatchEx 失败: {e}")
+                try:
+                    word.Quit()
+                except:
+                    pass
+            finally:
+                pythoncom.CoUninitialize()
+        except ImportError:
+            print("[DOC提取] win32com 未安装，跳过")
+
+        # 方案2：WPS COM 接口（Kwps.Application）
+        try:
+            import win32com.client
+            import pythoncom
+            import shutil
+            import tempfile
+            pythoncom.CoInitialize()
+            try:
+                wps = win32com.client.Dispatch("Kwps.Application")
+                wps.Visible = False
+                tmp_dir = tempfile.mkdtemp()
+                tmp_path = os.path.join(tmp_dir, "temp_doc.doc")
+                shutil.copy2(abs_path, tmp_path)
+                doc = wps.Documents.Open(tmp_path, ReadOnly=True)
+                text = doc.Content.Text
+                doc.Close(False)
+                wps.Quit()
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                print(f"[DOC提取] WPS COM 成功，文本长度: {len(text)}")
+                return text
+            except Exception as e:
+                print(f"[DOC提取] WPS COM 失败: {e}")
+                try:
+                    wps.Quit()
+                except:
+                    pass
+            finally:
+                pythoncom.CoUninitialize()
+        except ImportError:
+            pass
+
+        # 方案3：LibreOffice 转成 docx 再提取
+        try:
+            import subprocess, tempfile, shutil
+            tmp_dir = tempfile.mkdtemp()
+            result = subprocess.run(
+                ["soffice", "--headless", "--convert-to", "docx", "--outdir", tmp_dir, abs_path],
+                capture_output=True, timeout=30
+            )
+            docx_name = os.path.splitext(os.path.basename(abs_path))[0] + ".docx"
+            docx_path = os.path.join(tmp_dir, docx_name)
+            if os.path.exists(docx_path):
+                text = self._extract_text_from_docx(docx_path)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                print(f"[DOC提取] LibreOffice 转换成功，文本长度: {len(text)}")
+                return text
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[DOC提取] LibreOffice 失败: {e}")
+
+        return "无法解析 .doc 文件，请转换为 .docx 后重试"
 
 baidu_ocr = BaiduOCR()

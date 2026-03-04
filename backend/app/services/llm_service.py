@@ -152,7 +152,7 @@ class LLMService:
         }
 
         try:
-            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=60)
+            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=120)
             result = response.json()
             print(f"LLM响应状态: {response.status_code}")
 
@@ -213,21 +213,30 @@ class LLMService:
             ]
         }
 
-        try:
-            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=60)
-            result = response.json()
-            print(f"千帆响应状态: {response.status_code}")
+        # 最多重试2次
+        for attempt in range(2):
+            try:
+                timeout = 120 if attempt == 0 else 180
+                response = requests.post(url, json=payload, headers=self._get_headers(), timeout=timeout)
+                result = response.json()
+                print(f"千帆响应状态: {response.status_code}")
 
-            if "choices" in result and len(result["choices"]) > 0:
-                return result["choices"][0]["message"]["content"]
-            elif "error" in result:
-                print(f"千帆调用失败: {result['error']}")
+                if "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0]["message"]["content"]
+                elif "error" in result:
+                    print(f"千帆调用失败: {result['error']}")
+                    return ""
+                else:
+                    print(f"千帆返回未知格式: {result}")
+                    return ""
+            except requests.exceptions.ReadTimeout:
+                print(f"千帆调用超时 (第{attempt+1}次尝试, timeout={timeout}s)")
+                if attempt == 0:
+                    print("正在重试...")
+                    continue
                 return ""
-            else:
-                print(f"千帆返回未知格式: {result}")
-                return ""
-        except Exception as e:
-            print(f"千帆调用错误: {e}")
+            except Exception as e:
+                print(f"千帆调用错误: {e}")
             import traceback
             traceback.print_exc()
             return ""
@@ -285,62 +294,83 @@ class LLMService:
         #    - 查找包含表格结构的"附件"、"明细"段落（最多2000字符）
         #    - 后1500字符（签字盖章页）
         
-        if len(text) <= 6000:
+        if len(text) <= 8000:
             text_sample = text
         else:
-            text_head = text[:2000]
+            text_head = text[:3000]
             text_tail = text[-1500:]
             
             # 查找包含表格或明细的关键内容
             key_content = ""
             
-            # 按页面分割文本
-            pages = text.split("--- 第")
+            # 判断文本来源：PDF(有分页标记) vs Word(无分页标记)
+            has_page_markers = "--- 第" in text
             
-            # 优先级1：查找包含"附件"且有表格特征的页面（序号、产品、价格等）
-            for page in pages:
-                if "附件" in page:
-                    # 检查是否包含表格特征：序号、产品/服务名称、价格/金额
-                    has_table_structure = (
-                        ("序号" in page or "编号" in page or re.search(r'^\s*\d+[、\.]', page, re.MULTILINE)) and
-                        ("产品" in page or "服务" in page or "项目" in page or "内容" in page) and
-                        (re.search(r'\d+[,，]?\d*\.?\d*\s*元', page) or "价格" in page or "金额" in page or "费用" in page)
+            if has_page_markers:
+                # PDF文本：按页面分割搜索
+                segments = text.split("--- 第")
+            else:
+                # Word文本：按"第X条"、"附件"等结构分割为段落块搜索
+                # 用条款标题分割，每个块约800-2000字符
+                segments = re.split(r'\n(?=第[一二三四五六七八九十\d]+[条章节]|附件|ANNEX)', text)
+                # 如果分割后段落太少，按双换行分割
+                if len(segments) <= 2:
+                    segments = re.split(r'\n{2,}', text)
+            
+            # 搜索关键内容的通用逻辑
+            table_keywords = ["附件", "明细", "清单", "价格表", "报价", "费用表"]
+            content_keywords = ["服务内容", "工作内容", "合作内容", "项目概况", "服务范围", "维保", "运维"]
+            price_pattern = r'\d+[,，]?\d*\.?\d*\s*元'
+            
+            # 优先级1：查找包含"附件/明细"且有表格特征的段落
+            for seg in segments:
+                if any(kw in seg for kw in table_keywords):
+                    has_table = (
+                        ("序号" in seg or "编号" in seg or re.search(r'^\s*\d+[、\.\)]', seg, re.MULTILINE)) and
+                        ("产品" in seg or "服务" in seg or "项目" in seg or "内容" in seg or "名称" in seg) and
+                        (re.search(price_pattern, seg) or "价格" in seg or "金额" in seg or "费用" in seg or "单价" in seg)
                     )
-                    if has_table_structure:
-                        # 找到包含表格的附件页面，取完整内容
-                        key_content = page[:2000]
-                        print(f"找到附件表格内容，长度: {len(key_content)}")
+                    if has_table:
+                        key_content = seg[:2500]
+                        print(f"找到附件/明细表格内容，长度: {len(key_content)}")
                         break
             
-            # 优先级2：查找包含"明细"、"清单"且有数字的页面
+            # 优先级2：查找包含服务/合作内容的核心条款
             if not key_content:
-                for page in pages:
-                    if any(kw in page for kw in ["产品明细", "价格明细", "费用明细", "服务清单", "产品清单", "服务内容"]):
-                        # 检查是否包含多个价格数字
-                        price_matches = re.findall(r'\d+[,，]?\d*\.?\d*\s*元', page)
-                        if len(price_matches) >= 2:  # 至少2个价格，说明是明细表
-                            key_content = page[:2000]
-                            print(f"找到明细表内容，价格数量: {len(price_matches)}")
+                for seg in segments:
+                    if any(kw in seg for kw in content_keywords):
+                        price_matches = re.findall(price_pattern, seg)
+                        if len(price_matches) >= 1 or len(seg) > 200:
+                            key_content = seg[:2500]
+                            print(f"找到合作内容段落，长度: {len(key_content)}")
                             break
             
-            # 优先级3：查找包含多个价格数字的页面（可能是表格）
+            # 优先级3：查找包含多个价格数字的段落（可能是表格）
             if not key_content:
-                for page in pages:
-                    price_matches = re.findall(r'\d+[,，]?\d*\.?\d*\s*元', page)
-                    if len(price_matches) >= 3:  # 至少3个价格，可能是价格表
-                        key_content = page[:2000]
-                        print(f"找到价格表内容，价格数量: {len(price_matches)}")
+                for seg in segments:
+                    price_matches = re.findall(price_pattern, seg)
+                    if len(price_matches) >= 2:
+                        key_content = seg[:2500]
+                        print(f"找到价格密集段落，价格数量: {len(price_matches)}")
+                        break
+            
+            # 优先级4：查找付款方式相关段落
+            if not key_content:
+                for seg in segments:
+                    if any(kw in seg for kw in ["付款", "结算", "支付", "账期"]):
+                        key_content = seg[:2500]
+                        print(f"找到付款方式段落，长度: {len(key_content)}")
                         break
             
             if key_content:
                 text_sample = text_head + "\n\n...[前部分省略]...\n\n" + key_content + "\n\n...[中间部分省略]...\n\n" + text_tail
             else:
-                # 如果没找到关键内容，使用中间位置
-                mid_start = len(text) // 2 - 1000
-                mid_end = mid_start + 2000
+                # 如果没找到关键内容，取更多中间文本
+                mid_start = len(text) // 3
+                mid_end = mid_start + 2500
                 text_mid = text[mid_start:mid_end]
                 text_sample = text_head + "\n\n...[前部分省略]...\n\n" + text_mid + "\n\n...[中间部分省略]...\n\n" + text_tail
-                print("未找到明细表，使用中间位置采样")
+                print("未找到关键段落，使用中间位置采样")
 
         full_prompt = f"""你是一个专业的合同分析助手。请仔细阅读以下合同全文，提取以下内容并用Markdown格式输出。
 

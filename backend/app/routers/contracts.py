@@ -7,12 +7,39 @@ import json
 import re
 from dateutil.relativedelta import relativedelta
 
-from app.database import get_db, Contract, init_db, User
+from app.database import get_db, Contract, init_db, User, ContractAttachment, Supplement
 from app.schemas import ContractResponse, ContractListResponse, ContractUpdate, UploadResponse, ExtractData
 from app.services import file_storage, contract_parser, llm_service
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/contracts", tags=["合同管理"])
+
+# LLM 返回的无效值列表
+_INVALID_LLM_VALUES = {"未提及", "未知", "无", "null", "None", "N/A", "不详", "未识别", "未找到", "暂无", ""}
+
+def _is_valid_llm_value(val) -> bool:
+    """判断 LLM 返回值是否有效（非空、非占位符）"""
+    if val is None:
+        return False
+    s = str(val).strip()
+    return s not in _INVALID_LLM_VALUES
+
+def _extract_title_from_text(text: str) -> str:
+    """从合同原文中用正则提取合同名称作为兜底"""
+    if not text:
+        return ""
+    # 匹配常见合同标题模式
+    patterns = [
+        r'(?:^|\n)\s*([\u4e00-\u9fa5A-Za-z0-9（）()]+(?:合同|协议|合约)(?:书|函)?)\s*(?:\n|$)',
+        r'([\u4e00-\u9fa5]{4,30}(?:服务合同|采购合同|租赁合同|保密协议|框架协议|补充协议|合作协议|委托合同|劳动合同|技术合同))',
+    ]
+    for p in patterns:
+        m = re.search(p, text[:500])
+        if m:
+            title = m.group(1).strip()
+            if len(title) >= 4:
+                return title
+    return ""
 
 def _calculate_contract_status(end_date_str) -> str:
     """根据合同结束日期自动计算合同状态
@@ -235,7 +262,7 @@ def _extract_price_table(text: str) -> str:
 def startup_event():
     init_db()
 
-@router.get("", response_model=ContractListResponse)
+@router.get("")
 def list_contracts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -243,60 +270,126 @@ def list_contracts(
     contract_type: Optional[str] = None,
     department: Optional[str] = None,
     status: Optional[str] = None,
+    sort_field: Optional[str] = Query(None),
+    sort_order: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Contract).filter(Contract.is_deleted == False)
-    
+    # 全局查出所有补充协议关联（linked_contract_id 是子合同，不应出现在主列表中）
+    all_supplement_rows = db.query(Supplement.contract_id, Supplement.linked_contract_id).filter(
+        Supplement.linked_contract_id != None,
+        Supplement.is_deleted == False
+    ).all()
+    # 所有被关联为补充协议的合同ID（这些不出现在主列表）
+    global_child_ids = set(row.linked_contract_id for row in all_supplement_rows)
+    # 主合同 -> [子合同ID列表]
+    global_supplement_map: dict = {}
+    for row in all_supplement_rows:
+        global_supplement_map.setdefault(row.contract_id, []).append(row.linked_contract_id)
+
+    # 主查询：排除所有子合同
+    query = db.query(Contract).filter(
+        Contract.is_deleted == False,
+        ~Contract.id.in_(global_child_ids) if global_child_ids else True
+    )
+
     if search:
         query = query.filter(
             (Contract.title.contains(search)) |
             (Contract.contract_number.contains(search)) |
             (Contract.parties.contains(search))
         )
-    
     if contract_type:
         query = query.filter(Contract.contract_type == contract_type)
-    
     if department:
         query = query.filter(Contract.department == department)
-    
     if status:
         query = query.filter(Contract.status == status)
-    
+
     total = query.count()
-    contracts = query.order_by(Contract.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
-    
-    # 自动计算合同状态
+
+    # 排序
+    field_map = {
+        'contract_number': Contract.contract_number,
+        'title': Contract.title,
+        'contract_type': Contract.contract_type,
+        'department': Contract.department,
+        'amount': Contract.amount,
+        'signed_date': Contract.signed_date,
+        'start_date': Contract.start_date,
+        'status': Contract.status,
+        'updated_at': Contract.updated_at,
+    }
+    sort_column = field_map.get(sort_field or '', Contract.updated_at)
+    if sort_order == 'asc':
+        contracts = query.order_by(sort_column.asc()).offset((page - 1) * page_size).limit(page_size).all()
+    else:
+        contracts = query.order_by(sort_column.desc()).offset((page - 1) * page_size).limit(page_size).all()
+
+    # 批量加载本页主合同涉及的子合同详情
+    page_contract_ids = [c.id for c in contracts]
+    needed_child_ids = []
+    for cid in page_contract_ids:
+        needed_child_ids.extend(global_supplement_map.get(cid, []))
+
+    linked_contracts_map: dict = {}
+    if needed_child_ids:
+        for lc in db.query(Contract).filter(Contract.id.in_(needed_child_ids), Contract.is_deleted == False).all():
+            linked_contracts_map[lc.id] = lc
+
+    def _contract_dict(c, is_child=False, children=None):
+        return {
+            "id": c.id,
+            "contract_number": c.contract_number,
+            "title": c.title,
+            "contract_type": c.contract_type,
+            "department": c.department,
+            "status": _calculate_contract_status(str(c.end_date)),
+            "parties": c.parties or "",
+            "amount": c.amount,
+            "currency": c.currency,
+            "signed_date": c.signed_date.isoformat() if c.signed_date else None,
+            "start_date": c.start_date.isoformat() if c.start_date else None,
+            "end_date": c.end_date.isoformat() if c.end_date else None,
+            "file_path": c.file_path or "",
+            "summary": c.summary if not is_child else None,
+            "risk_level": c.risk_level if not is_child else None,
+            "created_at": c.created_at,
+            "updated_at": c.updated_at,
+            "source": c.source,
+            "is_supplement_child": is_child,
+            "supplement_children": children or [],
+        }
+
     contracts_with_status = []
     for contract in contracts:
-        contract_dict = {
-            "id": contract.id,
-            "contract_number": contract.contract_number,
-            "title": contract.title,
-            "contract_type": contract.contract_type,
-            "department": contract.department,
-            "status": _calculate_contract_status(str(contract.end_date)),
-            "parties": contract.parties,
-            "amount": contract.amount,
-            "currency": contract.currency,
-            "signed_date": contract.signed_date.isoformat() if contract.signed_date else None,
-            "start_date": contract.start_date.isoformat() if contract.start_date else None,
-            "end_date": contract.end_date.isoformat() if contract.end_date else None,
-            "file_path": contract.file_path,
-            "summary": contract.summary,
-            "risk_level": contract.risk_level,
-            "created_at": contract.created_at,
-            "updated_at": contract.updated_at,
-        }
-        contracts_with_status.append(contract_dict)
-    
+        child_ids = global_supplement_map.get(contract.id, [])
+        children = [
+            _contract_dict(linked_contracts_map[cid], is_child=True)
+            for cid in child_ids if cid in linked_contracts_map
+        ]
+        contracts_with_status.append(_contract_dict(contract, is_child=False, children=children))
+
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
         "contracts": contracts_with_status
     }
+
+@router.get("/contract-types")
+def get_contract_types(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取数据库中已有的合同类型列表（去重排序）"""
+    rows = db.query(Contract.contract_type).filter(
+        Contract.is_deleted == False,
+        Contract.contract_type != None,
+        Contract.contract_type != ""
+    ).distinct().all()
+    types = sorted(set(r[0] for r in rows if r[0]))
+    return {"types": types}
 
 @router.get("/{contract_id}")
 def get_contract(
@@ -315,22 +408,35 @@ def get_contract(
         "contract_type": contract.contract_type,
         "department": contract.department,
         "status": _calculate_contract_status(str(contract.end_date)),
-        "parties": contract.parties,
+        "parties": contract.parties or "",
         "amount": contract.amount,
         "currency": contract.currency,
         "signed_date": contract.signed_date.isoformat() if contract.signed_date else None,
         "start_date": contract.start_date.isoformat() if contract.start_date else None,
         "end_date": contract.end_date.isoformat() if contract.end_date else None,
-        "file_path": contract.file_path,
+        "file_path": contract.file_path or "",
         "summary": contract.summary,
         "risk_level": contract.risk_level,
         "risk_analysis": contract.risk_analysis,
+        "extracted_data": contract.extracted_data,
         "created_at": contract.created_at,
         "updated_at": contract.updated_at,
+        # OA系统字段
+        "source": contract.source,
+        "oa_id": contract.oa_id,
+        "applicant": contract.applicant,
+        "position": contract.position,
+        "company": contract.company,
+        "counterparty": contract.counterparty,
+        "counterparty_contact": contract.counterparty_contact,
+        "counterparty_address": contract.counterparty_address,
+        "payment_type": contract.payment_type,
+        "copies": contract.copies,
+        "raw_data": contract.raw_data,
     }
 
 def _async_llm_process(contract_id: int, raw_text: str):
-    """后台线程：异步执行LLM摘要提取"""
+    """后台线程：异步执行LLM摘要提取 + 结构化字段更新"""
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -338,17 +444,82 @@ def _async_llm_process(contract_id: int, raw_text: str):
         if not contract:
             return
 
-        # LLM提取摘要
+        # 1. 先提取结构化字段（标题、甲乙方、金额、日期等）—— 速度较快，先更新标题
+        try:
+            llm_result = llm_service.llm_service.parse_contract_with_llm(raw_text)
+            if llm_result:
+                # 合同名称（过滤无效值，兜底从原文提取）
+                llm_title = llm_result.get("合同名称", "")
+                if _is_valid_llm_value(llm_title):
+                    contract.title = llm_title
+                    print(f"[异步] 更新合同名称: {contract.title}")
+                elif contract.title in _INVALID_LLM_VALUES or not contract.title:
+                    fallback_title = _extract_title_from_text(raw_text)
+                    if fallback_title:
+                        contract.title = fallback_title
+                        print(f"[异步] 从原文提取合同名称: {contract.title}")
+
+                # 甲乙方（过滤无效值）
+                parties_list = []
+                for key in ["甲方", "乙方"]:
+                    v = llm_result.get(key)
+                    if _is_valid_llm_value(v):
+                        parties_list.append(v)
+                if llm_result.get("丙方") and _is_valid_llm_value(llm_result["丙方"]):
+                    parties_list.append(llm_result["丙方"])
+                if parties_list:
+                    contract.parties = json.dumps(parties_list, ensure_ascii=False)
+                    print(f"[异步] 更新甲乙方: {parties_list}")
+
+                # 金额
+                if llm_result.get("服务费用总额"):
+                    amount_str = str(llm_result["服务费用总额"])
+                    numbers = re.findall(r'[\d]+\.?\d*', amount_str.replace(',', '').replace('，', ''))
+                    if numbers:
+                        try:
+                            contract.amount = float(numbers[0])
+                            print(f"[异步] 更新金额: {contract.amount}")
+                        except Exception:
+                            pass
+
+                # 日期字段
+                def _try_parse_date(date_str):
+                    if not date_str or date_str in (None, "null", ""):
+                        return None
+                    for fmt in ["%Y-%m-%d", "%Y-%m", "%Y/%m/%d", "%Y/%m"]:
+                        try:
+                            return datetime.strptime(str(date_str), fmt)
+                        except Exception:
+                            continue
+                    return None
+
+                if "签订日期" in llm_result:
+                    d = _try_parse_date(llm_result["签订日期"])
+                    if d:
+                        contract.signed_date = d
+                if "服务期限开始日期" in llm_result:
+                    d = _try_parse_date(llm_result["服务期限开始日期"])
+                    if d:
+                        contract.start_date = d
+                if "服务期限结束日期" in llm_result:
+                    d = _try_parse_date(llm_result["服务期限结束日期"])
+                    if d:
+                        contract.end_date = d
+        except Exception as e:
+            print(f"[异步] LLM结构化字段提取失败: {e}")
+
+        # 2. 提取摘要（较慢，放在结构化字段之后）
         try:
             llm_summary = llm_service.llm_service.extract_full_summary(raw_text)
             if llm_summary:
                 contract.summary = llm_summary
+                print(f"[异步] LLM摘要提取成功，长度: {len(llm_summary)}")
         except Exception as e:
             print(f"[异步] LLM摘要提取失败: {e}")
 
         contract.updated_at = datetime.now()
         db.commit()
-        print(f"[异步] 合同 {contract_id} LLM摘要提取完成")
+        print(f"[异步] 合同 {contract_id} LLM处理完成")
     except Exception as e:
         print(f"[异步] 处理合同 {contract_id} 失败: {e}")
     finally:
@@ -503,6 +674,56 @@ def delete_contract(
     
     return {"message": "合同删除成功"}
 
+
+@router.post("/{contract_id}/attachments/upload")
+async def upload_contract_attachment(
+    contract_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """为合同上传附件"""
+    from app.services import file_storage
+    from app.database import ContractAttachment
+
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+
+    content = await file.read()
+    file_size = len(content)
+
+    # 保存文件
+    import uuid, os
+    file_ext = os.path.splitext(file.filename or "")[1]
+    stored_name = f"{uuid.uuid4()}{file_ext}"
+    rel_path = f"contracts/{stored_name}"
+    save_path = file_storage.get_file_path(rel_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(save_path), "wb") as f:
+        f.write(content)
+
+    attachment = ContractAttachment(
+        contract_id=contract_id,
+        file_name=file.filename,
+        file_path=rel_path,
+        file_size=file_size,
+        attachment_type="uploaded",
+        is_deleted=False,
+        created_at=datetime.now(),
+    )
+    db.add(attachment)
+    db.commit()
+    db.refresh(attachment)
+
+    return {
+        "id": attachment.id,
+        "file_name": attachment.file_name,
+        "file_size": attachment.file_size,
+        "attachment_type": attachment.attachment_type,
+        "created_at": attachment.created_at.isoformat(),
+    }
+
 @router.get("/{contract_id}/download")
 def download_contract(
     contract_id: int,
@@ -515,9 +736,31 @@ def download_contract(
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
     
+    # OA导入的合同没有file_path
+    if not contract.file_path:
+        raise HTTPException(status_code=404, detail="OA导入的合同没有主文件，请从附件清单中选择要预览的文件")
+    
     full_path = file_storage.get_file_path(contract.file_path)
     if not full_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
+    
+    # 根据文件扩展名确定 content-type
+    import mimetypes
+    ext = full_path.suffix.lower()
+    mime_map = {
+        ".pdf": "application/pdf",
+        ".doc": "application/msword",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+        ".tiff": "image/tiff",
+        ".tif": "image/tiff",
+    }
+    media_type = mime_map.get(ext, mimetypes.guess_type(str(full_path))[0] or "application/octet-stream")
     
     if mode == "preview":
         from starlette.responses import Response
@@ -525,14 +768,16 @@ def download_contract(
             content = f.read()
         return Response(
             content=content,
-            media_type="application/pdf",
+            media_type=media_type,
             headers={"Content-Disposition": "inline"}
         )
     
+    # 下载时用原始文件扩展名
+    download_name = f"{contract.contract_number or contract.title or 'contract'}{ext}"
     return FileResponse(
         path=str(full_path),
-        filename=f"{contract.contract_number}.pdf",
-        media_type="application/pdf"
+        filename=download_name,
+        media_type=media_type
     )
 
 @router.get("/{contract_id}/analyze")
@@ -785,12 +1030,19 @@ def _async_reparse_process(contract_id: int, file_path_str: str):
         contract.raw_text = raw_text
         
         # 优先使用LLM识别的合同名称
-        if llm_result.get("合同名称"):
-            contract.title = llm_result["合同名称"]
+        llm_title = llm_result.get("合同名称", "")
+        if _is_valid_llm_value(llm_title):
+            contract.title = llm_title
             print(f"[异步重解析] 更新合同名称: {contract.title}")
         else:
-            contract.title = extracted.get("title", contract.title)
-            print(f"[异步重解析] 使用OCR提取的合同名称: {contract.title}")
+            ocr_title = extracted.get("title", "")
+            if _is_valid_llm_value(ocr_title):
+                contract.title = ocr_title
+            else:
+                fallback_title = _extract_title_from_text(raw_text)
+                if fallback_title:
+                    contract.title = fallback_title
+            print(f"[异步重解析] 使用兜底合同名称: {contract.title}")
         
         contract.contract_type = extracted.get("contract_type", contract.contract_type)
         contract.department = extracted.get("department", contract.department)
@@ -889,37 +1141,501 @@ def _async_reparse_process(contract_id: int, file_path_str: str):
         db.close()
 
 
+def _async_reparse_oa_contract(contract_id: int, attachment_file_path: str):
+    """后台线程：异步解析OA导入合同的附件"""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        contract = db.query(Contract).filter(Contract.id == contract_id).first()
+        if not contract:
+            print(f"[OA重解析] 合同 {contract_id} 不存在")
+            return
+
+        print(f"[OA重解析] 开始解析合同 {contract_id}，附件路径: {attachment_file_path}")
+
+        # 1. 提取文本（OCR / docx解析）
+        raw_text = contract.raw_text
+        extracted = {}
+
+        if not raw_text or len(raw_text) < 100:
+            print(f"[OA重解析] 从附件提取文本...")
+            try:
+                parse_result = contract_parser.parse_contract(attachment_file_path, "")
+                extracted = parse_result.get("data", {})
+                raw_text = parse_result.get("raw_text", "")
+                print(f"[OA重解析] 文本提取完成，长度: {len(raw_text)}")
+            except Exception as e:
+                print(f"[OA重解析] 文本提取失败: {e}")
+                import traceback
+                traceback.print_exc()
+                # 即使提取失败也继续，不要return
+        else:
+            print(f"[OA重解析] 使用已有文本，长度: {len(raw_text)}")
+            extracted = {
+                "contract_number": contract.contract_number,
+                "title": contract.title,
+                "parties": json.loads(contract.parties) if contract.parties else [],
+                "amount": contract.amount,
+                "contract_type": contract.contract_type,
+                "department": contract.department,
+                "signed_date": contract.signed_date.strftime("%Y-%m-%d") if contract.signed_date else None,
+                "start_date": contract.start_date.strftime("%Y-%m-%d") if contract.start_date else None,
+                "end_date": contract.end_date.strftime("%Y-%m-%d") if contract.end_date else None,
+            }
+
+        if not raw_text or len(raw_text) < 50:
+            print(f"[OA重解析] 文本太短或为空，无法解析")
+            # 不覆盖OA原始summary，将错误信息存到extracted_data
+            err_data = {"llm_summary": "附件文本提取失败，无法进行AI解析"}
+            if contract.summary and not contract.summary.startswith("正在解析"):
+                err_data["oa_original_summary"] = contract.summary
+            contract.extracted_data = json.dumps(err_data, ensure_ascii=False)
+            # 如果summary被临时状态覆盖，尝试恢复
+            if contract.summary and contract.summary.startswith("正在解析"):
+                contract.summary = ""  # 清空临时状态
+            contract.updated_at = datetime.now()
+            db.commit()
+            return
+
+        # 保存raw_text
+        contract.raw_text = raw_text
+
+        # 2. LLM增强解析（提取结构化字段）
+        llm_result = {}
+        try:
+            llm_result = llm_service.llm_service.parse_contract_with_llm(raw_text)
+            print(f"[OA重解析] LLM字段解析结果: {llm_result}")
+        except Exception as e:
+            print(f"[OA重解析] LLM字段解析失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+        if llm_result:
+            extracted = _merge_llm_result(extracted, llm_result)
+
+        # 3. LLM生成摘要
+        summary = ""
+        try:
+            llm_summary = llm_service.llm_service.extract_full_summary(raw_text)
+            if llm_summary:
+                summary = llm_summary
+                print(f"[OA重解析] LLM摘要生成成功，长度: {len(summary)}")
+        except Exception as e:
+            print(f"[OA重解析] LLM摘要生成失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+        if not summary:
+            summary = _generate_contract_summary(extracted, raw_text)
+            print(f"[OA重解析] 使用基础摘要，长度: {len(summary)}")
+
+        # 4. 更新合同字段
+        # 更新签约方（过滤无效值）
+        if llm_result.get("甲方") or llm_result.get("乙方"):
+            parties_list = []
+            for key in ["甲方", "乙方"]:
+                v = llm_result.get(key)
+                if _is_valid_llm_value(v):
+                    parties_list.append(v)
+            if llm_result.get("丙方") and _is_valid_llm_value(llm_result["丙方"]):
+                parties_list.append(llm_result["丙方"])
+            contract.parties = json.dumps(parties_list, ensure_ascii=False)
+        elif extracted.get("parties"):
+            contract.parties = json.dumps(extracted.get("parties", []), ensure_ascii=False)
+
+        # OA合同：LLM摘要存到extracted_data.llm_summary，不覆盖原始summary（OA申请摘要）
+        # 保存原始OA摘要（如果当前summary是"正在解析..."的临时状态，恢复原始值）
+        original_summary = None
+        if contract.extracted_data:
+            try:
+                ed = json.loads(contract.extracted_data)
+                original_summary = ed.get("oa_original_summary")
+            except:
+                pass
+        
+        # 第一次解析时，备份OA原始摘要
+        if not original_summary and contract.summary and not contract.summary.startswith("正在解析"):
+            original_summary = contract.summary
+        
+        # 将LLM摘要存入extracted_data
+        extracted["llm_summary"] = summary
+        if original_summary:
+            extracted["oa_original_summary"] = original_summary
+            contract.summary = original_summary  # 恢复OA原始摘要
+        elif contract.summary and contract.summary.startswith("正在解析"):
+            # 如果没有原始摘要且当前是临时状态，用LLM摘要作为summary（触发前端轮询完成判定）
+            contract.summary = summary
+
+        # 合同名称（过滤无效值）
+        llm_title = llm_result.get("合同名称", "")
+        if _is_valid_llm_value(llm_title):
+            contract.title = llm_title
+        elif contract.title in _INVALID_LLM_VALUES or not contract.title:
+            fallback_title = _extract_title_from_text(raw_text)
+            if fallback_title:
+                contract.title = fallback_title
+
+        # 合同类型
+        if extracted.get("contract_type") and extracted["contract_type"] != "其他":
+            contract.contract_type = extracted["contract_type"]
+
+        # 金额
+        if llm_result.get("服务费用总额"):
+            amount_str = llm_result["服务费用总额"]
+            # 先尝试阿拉伯数字
+            numbers = re.findall(r'\d+\.?\d*', amount_str.replace(',', '').replace('，', ''))
+            if numbers:
+                try:
+                    contract.amount = float(numbers[0])
+                except:
+                    pass
+            else:
+                # 尝试中文大写金额
+                from app.routers.import_contracts import _cn_amount_to_float
+                cn_amount = _cn_amount_to_float(amount_str)
+                if cn_amount:
+                    contract.amount = cn_amount
+        elif extracted.get("amount"):
+            contract.amount = extracted.get("amount")
+
+        # 日期（支持从非标准LLM返回文本中提取日期）
+        from app.routers.import_contracts import _extract_date_from_text
+        for field_name, db_field in [
+            ("签订日期", "signed_date"),
+            ("服务期限开始日期", "start_date"),
+            ("服务期限结束日期", "end_date"),
+        ]:
+            val = llm_result.get(field_name)
+            if val and str(val) != "null":
+                date_str = _extract_date_from_text(str(val))
+                if date_str:
+                    try:
+                        setattr(contract, db_field, datetime.strptime(date_str, "%Y-%m-%d"))
+                    except:
+                        pass
+
+        # 更新状态
+        if contract.end_date:
+            contract.status = _calculate_contract_status(contract.end_date)
+
+        contract.extracted_data = json.dumps(extracted, ensure_ascii=False)
+        contract.updated_at = datetime.now()
+        db.commit()
+        print(f"[OA重解析] 合同 {contract_id} 解析完成")
+    except Exception as e:
+        print(f"[OA重解析] 合同 {contract_id} 失败: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        db.close()
+
+
 @router.post("/{contract_id}/reparse")
 def reparse_contract(
     contract_id: int,
+    attachment_id: Optional[int] = Query(None, description="指定要解析的附件ID"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """重新解析合同，后台异步执行"""
+    """重新解析合同，后台异步执行。支持普通合同和OA导入的合同。"""
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
 
-    full_path = file_storage.get_file_path(contract.file_path)
-    if not full_path.exists():
-        raise HTTPException(status_code=404, detail="文件不存在")
-
-    # 先将摘要标记为基础版，触发前端轮询
-    contract.summary = _generate_contract_summary({}, contract.raw_text or "")
-    contract.updated_at = datetime.now()
-    db.commit()
-
-    # 使用非daemon线程，确保任务完成
-    # 虽然uvicorn reload会中断，但至少能在不reload的情况下正常工作
     import threading
-    t = threading.Thread(target=_async_reparse_process, args=(contract_id, str(full_path)))
-    t.daemon = False  # 改为非daemon，让线程有机会完成
-    t.start()
+
+    if contract.source == 'oa_import' and not contract.file_path:
+        # OA导入的合同：从附件中提取文本进行解析
+        target_att = None
+        
+        # 如果指定了附件ID，直接使用
+        if attachment_id:
+            target_att = db.query(ContractAttachment).filter(
+                ContractAttachment.id == attachment_id,
+                ContractAttachment.contract_id == contract_id,
+                ContractAttachment.is_deleted == False
+            ).first()
+            if not target_att:
+                raise HTTPException(status_code=404, detail="指定的附件不存在")
+        else:
+            # 自动查找可解析的附件（优先Word/PDF）
+            attachments = db.query(ContractAttachment).filter(
+                ContractAttachment.contract_id == contract_id,
+                ContractAttachment.is_deleted == False
+            ).all()
+            
+            if not attachments:
+                raise HTTPException(status_code=400, detail="OA合同没有附件，无法解析")
+            
+            for att in attachments:
+                ext = (att.file_name or "").rsplit('.', 1)[-1].lower()
+                if ext in ('docx', 'doc', 'pdf'):
+                    target_att = att
+                    break
+            if not target_att:
+                target_att = attachments[0]
+        
+        if not target_att.file_path:
+            raise HTTPException(status_code=400, detail="附件文件路径不存在")
+        
+        att_path = file_storage.get_file_path(target_att.file_path)
+        if not att_path.exists():
+            raise HTTPException(status_code=404, detail=f"附件文件不存在: {target_att.file_name}")
+        
+        # 备份OA原始summary到extracted_data，再设置临时解析状态
+        oa_original_summary = contract.summary or ""
+        backup_data = {}
+        if contract.extracted_data:
+            try:
+                backup_data = json.loads(contract.extracted_data)
+            except:
+                pass
+        if oa_original_summary and not oa_original_summary.startswith("正在解析"):
+            backup_data["oa_original_summary"] = oa_original_summary
+        contract.extracted_data = json.dumps(backup_data, ensure_ascii=False)
+        contract.summary = f"正在解析附件: {target_att.file_name}..."
+        contract.updated_at = datetime.now()
+        db.commit()
+        
+        t = threading.Thread(target=_async_reparse_oa_contract, args=(contract_id, str(att_path)))
+        t.daemon = False
+        t.start()
+    else:
+        # 普通上传的合同
+        if not contract.file_path:
+            raise HTTPException(status_code=400, detail="合同没有关联文件，无法解析")
+        
+        full_path = file_storage.get_file_path(contract.file_path)
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+        # 先将摘要标记为基础版，触发前端轮询
+        contract.summary = _generate_contract_summary({}, contract.raw_text or "")
+        contract.updated_at = datetime.now()
+        db.commit()
+
+        t = threading.Thread(target=_async_reparse_process, args=(contract_id, str(full_path)))
+        t.daemon = False
+        t.start()
 
     return {
         "contract_id": contract_id,
         "message": "正在后台重新解析，请稍候刷新查看"
     }
+
+
+@router.get("/{contract_id}/parse-stream")
+async def parse_stream(
+    contract_id: int,
+    token: str = Query(..., description="认证token"),
+    db: Session = Depends(get_db)
+):
+    """SSE流式输出合同解析进度和结果"""
+    from fastapi.responses import StreamingResponse
+    from app.auth import verify_token
+    import asyncio
+
+    # 验证token（SSE不能用Authorization header，改用query param）
+    user = verify_token(token, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="未授权")
+
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+
+    raw_text = contract.raw_text or ""
+
+    async def event_generator():
+        import json as _json
+
+        def send(event: str, data: dict):
+            return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+        if not raw_text or len(raw_text) < 100:
+            yield send("error", {"message": "合同文本为空，无法解析"})
+            return
+
+        yield send("progress", {"step": "fields", "message": "正在提取合同基本信息..."})
+
+        # Step 1: 结构化字段（在线程池中运行同步LLM调用）
+        loop = asyncio.get_event_loop()
+        try:
+            llm_result = await loop.run_in_executor(
+                None, llm_service.llm_service.parse_contract_with_llm, raw_text
+            )
+        except Exception as e:
+            llm_result = {}
+            yield send("progress", {"step": "fields", "message": f"字段提取失败: {e}"})
+
+        if llm_result:
+            # 更新数据库
+            from app.database import SessionLocal
+            _db = SessionLocal()
+            try:
+                c = _db.query(Contract).filter(Contract.id == contract_id).first()
+                if c:
+                    llm_title = llm_result.get("合同名称", "")
+                    if _is_valid_llm_value(llm_title):
+                        c.title = llm_title
+                    elif c.title in _INVALID_LLM_VALUES or not c.title:
+                        fallback_title = _extract_title_from_text(raw_text)
+                        if fallback_title:
+                            c.title = fallback_title
+                    parties_list = []
+                    for k in ["甲方", "乙方", "丙方"]:
+                        v = llm_result.get(k)
+                        if _is_valid_llm_value(v):
+                            parties_list.append(v)
+                    if parties_list:
+                        c.parties = _json.dumps(parties_list, ensure_ascii=False)
+                    if llm_result.get("服务费用总额"):
+                        nums = re.findall(r'[\d]+\.?\d*', str(llm_result["服务费用总额"]).replace(',', ''))
+                        if nums:
+                            try:
+                                c.amount = float(nums[0])
+                            except Exception:
+                                pass
+                    def _pd(s):
+                        if not s or str(s) in ("null", ""):
+                            return None
+                        for fmt in ["%Y-%m-%d", "%Y-%m", "%Y/%m/%d"]:
+                            try:
+                                return datetime.strptime(str(s), fmt)
+                            except Exception:
+                                continue
+                        return None
+                    if llm_result.get("签订日期"):
+                        d = _pd(llm_result["签订日期"])
+                        if d:
+                            c.signed_date = d
+                    if llm_result.get("服务期限开始日期"):
+                        d = _pd(llm_result["服务期限开始日期"])
+                        if d:
+                            c.start_date = d
+                    if llm_result.get("服务期限结束日期"):
+                        d = _pd(llm_result["服务期限结束日期"])
+                        if d:
+                            c.end_date = d
+                    c.updated_at = datetime.now()
+                    _db.commit()
+            finally:
+                _db.close()
+
+            yield send("fields", {
+                "title": llm_result.get("合同名称", ""),
+                "parties": [llm_result.get("甲方", ""), llm_result.get("乙方", ""), llm_result.get("丙方", "")],
+                "signed_date": llm_result.get("签订日期", ""),
+                "start_date": llm_result.get("服务期限开始日期", ""),
+                "end_date": llm_result.get("服务期限结束日期", ""),
+                "amount": llm_result.get("服务费用总额", ""),
+            })
+
+        yield send("progress", {"step": "summary", "message": "正在生成合同摘要..."})
+
+        # Step 2: 流式摘要（逐块输出）
+        import requests as _requests
+        from app.config import config as _config
+
+        ak = _config.BAIDUQIANFAN_API_KEY
+        sk = _config.BAIDUQIANFAN_SECRET_KEY
+        if ak and sk and ak.startswith("bce-v3/ALTAK-") and "/" not in ak.split("ALTAK-", 1)[-1]:
+            api_key = f"{ak}/{sk}"
+        else:
+            api_key = ak
+
+        # 构建摘要prompt（复用llm_service的逻辑，但用流式接口）
+        text_sample = raw_text if len(raw_text) <= 8000 else raw_text[:3000] + "\n\n...[中间省略]...\n\n" + raw_text[-1500:]
+
+        summary_prompt = f"""你是一个专业的合同分析助手。请仔细阅读以下合同全文，提取以下内容并用Markdown格式输出。
+
+## 重要规则
+只提取文本中实际存在的信息，不要添加任何虚构内容。如果某部分不存在，请说明"未找到相关内容"。
+
+## 输出结构
+
+### 主要合作内容
+提取服务范围、合作内容、双方权利义务等。
+
+### 产品/服务明细表
+如有明细表，用标准Markdown表格格式完整输出。
+
+### 付款方式
+提取付款条件、付款比例、时间节点等。
+
+合同文本：
+{text_sample}
+
+请直接输出Markdown格式内容。"""
+
+        full_summary = ""
+        try:
+            url = "https://qianfan.baidubce.com/v2/chat/completions"
+            payload = {
+                "model": "ernie-3.5-8k",
+                "messages": [{"role": "user", "content": summary_prompt}],
+                "stream": True
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+
+            def _stream_request():
+                return _requests.post(url, json=payload, headers=headers, stream=True, timeout=180)
+
+            response = await loop.run_in_executor(None, _stream_request)
+
+            if response.status_code == 200:
+                for line in response.iter_lines():
+                    if line:
+                        line_str = line.decode('utf-8') if isinstance(line, bytes) else line
+                        if line_str.startswith("data: "):
+                            data_str = line_str[6:]
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk = _json.loads(data_str)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    full_summary += delta
+                                    yield send("chunk", {"text": delta})
+                            except Exception:
+                                pass
+            else:
+                # 流式失败，回退到非流式
+                fallback = await loop.run_in_executor(
+                    None, llm_service.llm_service.extract_full_summary, raw_text
+                )
+                if fallback:
+                    full_summary = fallback
+                    yield send("chunk", {"text": fallback})
+        except Exception as e:
+            yield send("progress", {"step": "summary", "message": f"摘要生成失败: {e}"})
+
+        # 保存摘要到数据库
+        if full_summary:
+            from app.database import SessionLocal
+            _db = SessionLocal()
+            try:
+                c = _db.query(Contract).filter(Contract.id == contract_id).first()
+                if c:
+                    c.summary = full_summary
+                    c.updated_at = datetime.now()
+                    _db.commit()
+            finally:
+                _db.close()
+
+        yield send("done", {"message": "解析完成"})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 def _merge_llm_result(extracted: dict, llm_result: dict) -> dict:
@@ -1054,3 +1770,5 @@ def _generate_contract_summary_with_llm(extracted: dict, raw_text: str, llm_resu
         return "\n\n".join(parts)
     else:
         return _generate_contract_summary(extracted, raw_text)
+
+

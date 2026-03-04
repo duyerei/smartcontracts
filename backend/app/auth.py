@@ -52,6 +52,21 @@ def get_current_user(
     return user
 
 
+def verify_token(token: str, db: Session) -> Optional[User]:
+    """验证token并返回用户，失败返回None（用于SSE等不能用Depends的场景）"""
+    try:
+        payload = jwt.decode(token, config.JWT_SECRET_KEY, algorithms=[config.JWT_ALGORITHM])
+        username: str = payload.get("sub")
+        if not username:
+            return None
+        user = db.query(User).filter(User.username == username).first()
+        if user and user.is_active:
+            return user
+    except JWTError:
+        pass
+    return None
+
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")

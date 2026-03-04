@@ -70,6 +70,21 @@ class FileStorage:
     
     def get_file_path(self, relative_path: str) -> Path:
         """获取文件路径，防止路径遍历攻击"""
+        # 处理OA导入的附件路径
+        if relative_path.startswith('attachments\\') or relative_path.startswith('attachments/'):
+            # OA附件存储在项目根目录的smart_contracts_import目录下
+            project_root = Path(__file__).parent.parent.parent.parent
+            oa_storage = project_root / "smart_contracts_import"
+            requested_path = (oa_storage / relative_path).resolve()
+            
+            # 确保路径在oa_storage内
+            try:
+                requested_path.relative_to(oa_storage.resolve())
+            except ValueError:
+                raise ValueError("非法的文件路径")
+            
+            return requested_path
+        
         # 规范化路径
         requested_path = (self.storage_path / relative_path).resolve()
         

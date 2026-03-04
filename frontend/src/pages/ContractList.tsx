@@ -1,10 +1,8 @@
-import { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { useState, useEffect, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { 
   Search, 
   Download, 
-  Eye, 
-  Trash2,
   AlertCircle
 } from 'lucide-react'
 import { 
@@ -30,6 +28,17 @@ import {
 import { contractApi } from '@/lib/api'
 import type { Contract, ContractType, Department, ContractStatus } from '@/types'
 
+const formatDate = (dateStr?: string) => {
+  if (!dateStr) return '-'
+  try {
+    const d = new Date(dateStr)
+    if (isNaN(d.getTime())) return dateStr
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  } catch {
+    return dateStr
+  }
+}
+
 const contractTypes: ContractType[] = ['采购合同', '销售合同', '人力合同', 'NDA保密协议', '租赁合同', '服务合同', '投资协议', '其他']
 const departments: Department[] = ['科技中心', '财务中心', '法务合规中心', '风控中心', '普惠金融', '人力行政中心', '其他']
 const statuses: ContractStatus[] = ['待审核', '已签署', '执行中', '已到期', '已终止']
@@ -38,21 +47,27 @@ export function ContractList() {
   const [contracts, setContracts] = useState<Contract[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState<string>('all')
   const [departmentFilter, setDepartmentFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [sortField, setSortField] = useState<string>('updated_at')
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+  const navigate = useNavigate()
 
   const loadContracts = async () => {
     setLoading(true)
     const result = await contractApi.list({
       page,
-      page_size: 10,
+      page_size: pageSize,
       search: searchQuery || undefined,
       contract_type: typeFilter !== 'all' ? typeFilter : undefined,
       department: departmentFilter !== 'all' ? departmentFilter : undefined,
       status: statusFilter !== 'all' ? statusFilter : undefined,
+      sort_field: sortField,
+      sort_order: sortOrder,
     })
     if (result.data) {
       setContracts(result.data.contracts as Contract[])
@@ -63,7 +78,7 @@ export function ContractList() {
 
   useEffect(() => {
     loadContracts()
-  }, [page, typeFilter, departmentFilter, statusFilter])
+  }, [page, pageSize, typeFilter, departmentFilter, statusFilter, sortField, sortOrder])
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -76,10 +91,28 @@ export function ContractList() {
     return () => clearTimeout(timer)
   }, [searchQuery])
 
+  // 构建树形渲染列表：补充协议合同插入到主合同行后面
+  const flatRows = useMemo(() => {
+    const rows: Array<{ contract: any; isChild: boolean }> = []
+    contracts.forEach(c => {
+      const raw = c as any
+      // 如果这条合同本身是某个主合同的补充协议，跳过
+      if (raw.is_supplement_child) return
+
+      rows.push({ contract: c, isChild: false })
+
+      // 插入子合同行
+      const children: any[] = raw.supplement_children || []
+      children.forEach(child => {
+        rows.push({ contract: child, isChild: true })
+      })
+    })
+    return rows
+  }, [contracts])
+
   const getStatusBadge = (status?: string, endDate?: string) => {
     if (!status || !endDate) return null
-    
-    const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'warning' | 'success'> = {
+    const variants = {
       '合同履行中': 'success',
       '即将到期': 'destructive',
       '履行完成': 'secondary',
@@ -88,8 +121,8 @@ export function ContractList() {
       '执行中': 'default',
       '已到期': 'destructive',
       '已终止': 'secondary',
-    }
-    return <Badge variant={variants[status] || 'default'}>{status}</Badge>
+    } as const
+    return <Badge variant={variants[status as keyof typeof variants] || 'default'}>{status}</Badge>
   }
 
   const getRiskBadge = (risk?: 'low' | 'medium' | 'high') => {
@@ -169,15 +202,87 @@ export function ContractList() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>合同编号</TableHead>
-                <TableHead>合同名称</TableHead>
-                <TableHead>类型</TableHead>
-                <TableHead>发起部门</TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'contract_number') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('contract_number')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  合同编号 {sortField === 'contract_number' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'title') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('title')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  合同名称 {sortField === 'title' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'contract_type') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('contract_type')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  类型 {sortField === 'contract_type' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'department') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('department')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  发起部门 {sortField === 'department' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
                 <TableHead>签约方</TableHead>
-                <TableHead>金额</TableHead>
-                <TableHead>有效期</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'amount') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('amount')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  金额 {sortField === 'amount' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'signed_date') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('signed_date')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  签订时间 {sortField === 'signed_date' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'start_date') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('start_date')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  有效期 {sortField === 'start_date' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
+                <TableHead className="cursor-pointer hover:bg-muted" onClick={() => {
+                  if (sortField === 'status') {
+                    setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                  } else {
+                    setSortField('status')
+                    setSortOrder('asc')
+                  }
+                }}>
+                  状态 {sortField === 'status' && (sortOrder === 'asc' ? '↑' : '↓')}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -196,17 +301,51 @@ export function ContractList() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    contracts.map((contract) => (
-                      <TableRow key={contract.id}>
-                        <TableCell className="font-medium">
-                          <Link to={`/contracts/${contract.id}`} className="hover:underline text-primary">
-                            {contract.contractNumber}
-                          </Link>
+                    flatRows.map(({ contract, isChild }, rowIndex) => {
+                      // 判断这行是否是某个主合同的最后一个子合同（用于连接线截止）
+                      const nextRow = flatRows[rowIndex + 1]
+                      const isLastChild = isChild && (!nextRow || !nextRow.isChild)
+
+                      return (
+                      <TableRow 
+                        key={contract.id}
+                        className={`cursor-pointer transition-colors ${isChild ? 'bg-slate-50/60 hover:bg-slate-100/80 dark:bg-slate-900/30' : 'hover:bg-muted/50'}`}
+                        onClick={() => navigate(`/contracts/${contract.id}`)}
+                      >
+                        {/* 合同编号列 */}
+                        <TableCell className="font-medium whitespace-nowrap">
+                          {contract.contractNumber}
                         </TableCell>
-                        <TableCell>
-                          <Link to={`/contracts/${contract.id}`} className="hover:underline text-primary">
-                            {contract.title}
-                          </Link>
+                        {/* 合同名称列：连接线 + 主/补标签 */}
+                        <TableCell className="relative min-w-[260px]">
+                          <div className="flex items-center gap-2">
+                            {/* 主合同：向下延伸的竖线（连接到子合同） */}
+                            {!isChild && (contract as any).supplement_children?.length > 0 && (
+                              <div className="absolute left-[15px] top-[50%] w-[2px] h-[50%] bg-gray-300 z-10" />
+                            )}
+                            {/* 补充协议：L形连接线 */}
+                            {isChild && (
+                              <>
+                                {/* 竖线：从上方延伸到行中间 */}
+                                <div className="absolute left-[15px] top-0 w-[2px] h-[50%] bg-gray-300" />
+                                {/* 如果不是最后一个子合同，竖线继续向下 */}
+                                {!isLastChild && (
+                                  <div className="absolute left-[15px] top-[50%] w-[2px] h-[50%] bg-gray-300" />
+                                )}
+                                {/* 横线：从竖线到文字 */}
+                                <div className="absolute left-[15px] top-[50%] w-[14px] h-[2px] bg-gray-300" />
+                                {/* 缩进占位 */}
+                                <div className="w-7 flex-shrink-0" />
+                              </>
+                            )}
+                            <span className="truncate">{contract.title}</span>
+                            {!isChild && (contract as any).supplement_children?.length > 0 && (
+                              <span className="flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-200">主</span>
+                            )}
+                            {isChild && (
+                              <span className="flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-50 text-orange-600 border border-orange-200">补</span>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell>{contract.type}</TableCell>
                         <TableCell>{contract.department}</TableCell>
@@ -224,59 +363,19 @@ export function ContractList() {
                           )}
                         </TableCell>
                         <TableCell>
-                          {contract.amount ? `${(contract.amount).toLocaleString()} ${contract.currency || 'CNY'}` : '-'}
+                          {contract.amount ? `${(contract.amount).toLocaleString()}` : '-'}
+                        </TableCell>
+                        <TableCell>
+                          {formatDate(contract.signedDate)}
                         </TableCell>
                         <TableCell>
                           {contract.startDate && contract.endDate 
-                            ? `${contract.startDate} ~ ${contract.endDate}` 
+                            ? `${formatDate(contract.startDate)} ~ ${formatDate(contract.endDate)}` 
                             : '-'}
                         </TableCell>
                         <TableCell>{getStatusBadge(contract.status, contract.endDate)}</TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex items-center justify-end gap-2">
-                            <Link to={`/contracts/${contract.id}`}>
-                              <Button variant="ghost" size="icon">
-                                <Eye className="h-4 w-4" />
-                              </Button>
-                            </Link>
-                            <Button variant="ghost" size="icon" onClick={async () => {
-                              try {
-                                const token = localStorage.getItem('token')
-                                const response = await fetch(`/api/v1/contracts/${contract.id}/download`, {
-                                  headers: { 'Authorization': `Bearer ${token}` }
-                                })
-                                if (response.ok) {
-                                  const blob = await response.blob()
-                                  const url = window.URL.createObjectURL(blob)
-                                  const a = document.createElement('a')
-                                  a.href = url
-                                  a.download = `${contract.title || 'contract'}.pdf`
-                                  document.body.appendChild(a)
-                                  a.click()
-                                  window.URL.revokeObjectURL(url)
-                                  document.body.removeChild(a)
-                                }
-                              } catch (error) {
-                                console.error('下载失败:', error)
-                              }
-                            }}>
-                              <Download className="h-4 w-4" />
-                            </Button>
-                            <Button variant="ghost" size="icon" onClick={async () => {
-                              if (!confirm(`确定要删除合同 ${contract.contractNumber} 吗？`)) return
-                              const result = await contractApi.delete(Number(contract.id))
-                              if (result.data) {
-                                loadContracts()
-                              } else {
-                                alert('删除失败: ' + result.error)
-                              }
-                            }}>
-                              <Trash2 className="h-4 w-4 text-destructive" />
-                            </Button>
-                          </div>
-                        </TableCell>
                       </TableRow>
-                    ))
+                    )})
                   )}
                 </>
               )}
@@ -287,16 +386,30 @@ export function ContractList() {
 
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          共 {total} 条记录
+          共 {total} 条记录，共 {Math.ceil(total / pageSize)} 页
         </p>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" disabled={page === 1} onClick={() => setPage(p => p - 1)}>
-            上一页
-          </Button>
-          <span className="text-sm">第 {page} 页</span>
-          <Button variant="outline" size="sm" disabled={contracts.length < 10} onClick={() => setPage(p => p + 1)}>
-            下一页
-          </Button>
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3 whitespace-nowrap">
+            <span className="text-sm text-muted-foreground">每页显示：</span>
+            <Select value={String(pageSize)} onChange={(e) => {
+              setPageSize(Number(e.target.value))
+              setPage(1)
+            }}>
+              <option value="10">10条</option>
+              <option value="20">20条</option>
+              <option value="50">50条</option>
+              <option value="100">100条</option>
+            </Select>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" disabled={page === 1} onClick={() => setPage(p => p - 1)}>
+              上一页
+            </Button>
+            <span className="text-sm whitespace-nowrap">第 {page} / {Math.ceil(total / pageSize)} 页</span>
+            <Button variant="outline" size="sm" disabled={contracts.length < pageSize} onClick={() => setPage(p => p + 1)}>
+              下一页
+            </Button>
+          </div>
         </div>
       </div>
     </div>

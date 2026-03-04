@@ -8,6 +8,8 @@ import {
   Shield,
   Users,
   LogOut,
+  Download,
+  CreditCard,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
@@ -15,9 +17,15 @@ import { useAuth } from '@/contexts/AuthContext'
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: '工作台' },
   { to: '/contracts', icon: FileText, label: '合同管理' },
+  { to: '/payments', icon: CreditCard, label: '付款管理' },
   { to: '/upload', icon: Upload, label: '上传合同' },
   { to: '/search', icon: Search, label: '智能搜索' },
   { to: '/settings', icon: Settings, label: '系统设置' },
+]
+
+const adminNavItems = [
+  { to: '/import', icon: Download, label: 'OA导入' },
+  { to: '/users', icon: Users, label: '用户管理' },
 ]
 
 export function Sidebar() {
@@ -58,9 +66,10 @@ export function Sidebar() {
             {item.label}
           </NavLink>
         ))}
-        {user?.role === 'admin' && (
+        {user?.role === 'admin' && adminNavItems.map((item) => (
           <NavLink
-            to="/users"
+            key={item.to}
+            to={item.to}
             className={({ isActive }) =>
               cn(
                 "flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors",
@@ -70,10 +79,10 @@ export function Sidebar() {
               )
             }
           >
-            <Users className="h-5 w-5" />
-            用户管理
+            <item.icon className="h-5 w-5" />
+            {item.label}
           </NavLink>
-        )}
+        ))}
       </nav>
       <div className="p-4 border-t space-y-3">
         {user && (

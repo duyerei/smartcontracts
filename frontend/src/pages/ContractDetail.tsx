@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useParams, Link, useNavigate } from 'react-router-dom'
+import { renderAsync } from 'docx-preview'
 import { 
   ArrowLeft, 
   FileText, 
@@ -14,10 +15,10 @@ import {
   Building,
   Calendar,
   DollarSign,
-  Shield,
   User,
   Save,
-  X
+  X,
+  Upload
 } from 'lucide-react'
 import { 
   Card, 
@@ -28,31 +29,47 @@ import {
 } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { SupplementList } from '@/components/SupplementList'
 import { PaymentList } from '@/components/PaymentList'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { contractApi } from '@/lib/api'
+import { contractApi, paymentManagementApi } from '@/lib/api'
 import type { Contract } from '@/types'
 
 export function ContractDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [contract, setContract] = useState<Contract | null>(null)
-  const [contractText, setContractText] = useState<string>('')
-  const [contractStructured, setContractStructured] = useState<Record<string, any> | null>(null)
   const [loading, setLoading] = useState(true)
-  const [loadingText, setLoadingText] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isReparsing, setIsReparsing] = useState(false)
   const [isLlmParsing, setIsLlmParsing] = useState(false)
-  const [showFullRisk, setShowFullRisk] = useState(false)
+  const [streamingSummary, setStreamingSummary] = useState('')
+  const sseRef = useRef<EventSource | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [activeTab, setActiveTab] = useState('info')
+  const [contractPayments, setContractPayments] = useState<any[]>([])
+  const [paymentsLoading, setPaymentsLoading] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string>('')
+  const [mainPreviewType, setMainPreviewType] = useState<'pdf' | 'image' | 'word' | 'unknown'>('unknown')
+  const [mainWordBuffer, setMainWordBuffer] = useState<ArrayBuffer | null>(null)
+  const mainWordContainerRef = useRef<HTMLDivElement>(null)
+  const [wordZoom, setWordZoom] = useState(100)
+  const [attachments, setAttachments] = useState<any[]>([])
+  const [selectedAttachment, setSelectedAttachment] = useState<any | null>(null)
+  const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string>('')
+  const [attachmentPreviewType, setAttachmentPreviewType] = useState<'pdf' | 'image' | 'word' | 'unknown'>('unknown')
+  const [isLoadingAttachment, setIsLoadingAttachment] = useState(false)
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const wordDocxContainerRef = useRef<HTMLDivElement>(null)
+  const [wordArrayBuffer, setWordArrayBuffer] = useState<ArrayBuffer | null>(null)
+  const [contractTypes, setContractTypes] = useState<string[]>([])
+  const [uploadingAttachment, setUploadingAttachment] = useState(false)
+  const uploadInputRef = useRef<HTMLInputElement>(null)
   const [editForm, setEditForm] = useState({
     title: '',
     contractType: '',
@@ -84,18 +101,92 @@ export function ContractDetail() {
       if (result.data) {
         const c = result.data as unknown as Contract
         setContract(c)
-        // 如果summary存在但不是LLM格式，说明后台还在解析
-        if (c.summary && !isLlmSummary(c.summary)) {
-          setIsLlmParsing(true)
+        // 不再自动触发LLM解析，只有用户主动点击"合同解析"按钮时才解析
+        
+        // 只有非OA导入的合同才加载主文件预览
+        if (c.source !== 'oa_import') {
+          loadPreviewUrl(id)
         }
         
-        // 加载预览URL
-        loadPreviewUrl(id)
+        // 加载附件列表（OA合同和普通合同都加载）
+        loadAttachments(id)
       }
       setLoading(false)
     }
     loadContract()
   }, [id])
+
+  // 加载合同类型列表（编辑时用）
+  useEffect(() => {
+    const token = localStorage.getItem('token')
+    if (!token) return
+    fetch('/api/v1/contracts/contract-types', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
+      .then(d => setContractTypes(d.types || []))
+      .catch(e => console.error('加载合同类型失败:', e))
+  }, [])
+
+  // 获取合同的付款记录
+  const fetchContractPayments = async () => {
+    if (!id) return
+    setPaymentsLoading(true)
+    try {
+      const result = await paymentManagementApi.getByContract(Number(id))
+      if (result.data) {
+        setContractPayments(result.data.payments || [])
+      }
+    } catch (error) {
+      console.error('获取付款记录失败:', error)
+    } finally {
+      setPaymentsLoading(false)
+    }
+  }
+
+  // 加载附件列表
+  const autoPreviewTriggered = useRef(false)
+  const loadAttachments = async (contractId: string) => {
+    try {
+      autoPreviewTriggered.current = false  // 重新加载时允许自动预览
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/v1/contracts/${contractId}/attachments`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        const atts = data.attachments || []
+        // 主附件排在最上方
+        atts.sort((a: any, b: any) => {
+          if (a.is_primary && !b.is_primary) return -1
+          if (!a.is_primary && b.is_primary) return 1
+          return 0
+        })
+        setAttachments(atts)
+        // 默认选择主附件，如果没有主附件则选第一个
+        if (atts.length > 0) {
+          const primaryAtt = atts.find((a: any) => a.is_primary) || atts[0]
+          setSelectedAttachment(primaryAtt)
+        }
+      }
+    } catch (error) {
+      console.error('加载附件失败:', error)
+    }
+  }
+
+  // 当选中附件且contract已加载时，自动触发预览
+  useEffect(() => {
+    if (selectedAttachment && contract?.id && !autoPreviewTriggered.current) {
+      autoPreviewTriggered.current = true
+      handleAttachmentPreview(selectedAttachment)
+    }
+  }, [selectedAttachment, contract?.id])
 
   // 加载预览URL
   const loadPreviewUrl = async (contractId: string) => {
@@ -109,8 +200,30 @@ export function ContractDetail() {
       
       if (response.ok) {
         const blob = await response.blob()
-        const url = window.URL.createObjectURL(blob)
-        setPreviewUrl(url)
+        const contentType = blob.type || response.headers.get('content-type') || ''
+        
+        if (contentType.includes('pdf')) {
+          setMainPreviewType('pdf')
+          const url = window.URL.createObjectURL(blob)
+          setPreviewUrl(url)
+        } else if (contentType.includes('image')) {
+          setMainPreviewType('image')
+          const url = window.URL.createObjectURL(blob)
+          setPreviewUrl(url)
+        } else if (contentType.includes('officedocument')) {
+          // .docx格式（openxmlformats），支持在线预览
+          setMainPreviewType('word')
+          const arrayBuffer = await blob.arrayBuffer()
+          setMainWordBuffer(arrayBuffer)
+        } else if (contentType.includes('msword')) {
+          // .doc旧格式，不支持在线预览
+          setMainPreviewType('unknown')
+        } else {
+          // 兜底：尝试当PDF处理
+          setMainPreviewType('pdf')
+          const url = window.URL.createObjectURL(blob)
+          setPreviewUrl(url)
+        }
       }
     } catch (error) {
       console.error('加载预览失败:', error)
@@ -123,36 +236,167 @@ export function ContractDetail() {
       if (previewUrl) {
         window.URL.revokeObjectURL(previewUrl)
       }
+      if (attachmentPreviewUrl) {
+        window.URL.revokeObjectURL(attachmentPreviewUrl)
+      }
     }
-  }, [previewUrl])
+  }, [previewUrl, attachmentPreviewUrl])
 
-  // 轮询检测LLM解析是否完成
+  // 处理Word文档渲染（附件）
   useEffect(() => {
-    if (!isLlmParsing || !id) return
-    
+    if (!wordArrayBuffer || !wordDocxContainerRef.current) return
+
+    const renderWord = async () => {
+      try {
+        if (wordDocxContainerRef.current) {
+          wordDocxContainerRef.current.innerHTML = ''
+          await renderAsync(wordArrayBuffer, wordDocxContainerRef.current, undefined, {
+            className: 'docx-preview-container',
+            inWrapper: true,
+            ignoreWidth: false,
+            ignoreHeight: false,
+            debug: false,
+          })
+        }
+      } catch (error) {
+        console.error('Word文档渲染失败:', error)
+        setAttachmentError(`Word文档渲染失败: ${(error as Error).message}`)
+      }
+    }
+
+    renderWord()
+  }, [wordArrayBuffer])
+
+  // 处理Word文档渲染（主合同）
+  useEffect(() => {
+    if (!mainWordBuffer || !mainWordContainerRef.current) return
+
+    const renderMainWord = async () => {
+      try {
+        if (mainWordContainerRef.current) {
+          mainWordContainerRef.current.innerHTML = ''
+          await renderAsync(mainWordBuffer, mainWordContainerRef.current, undefined, {
+            className: 'docx-preview-container',
+            inWrapper: true,
+            ignoreWidth: false,
+            ignoreHeight: false,
+            debug: false,
+          })
+        }
+      } catch (error) {
+        console.error('主合同Word渲染失败:', error)
+      }
+    }
+
+    renderMainWord()
+  }, [mainWordBuffer])
+
+  // SSE流式解析
+  const startParseStream = (contractId: string) => {
+    // 关闭已有连接
+    if (sseRef.current) {
+      sseRef.current.close()
+      sseRef.current = null
+    }
+
+    setStreamingSummary('')
+    setIsLlmParsing(true)
+
+    const token = localStorage.getItem('token')
+    const url = `/api/v1/contracts/${contractId}/parse-stream?token=${encodeURIComponent(token || '')}`
+    const es = new EventSource(url)
+    sseRef.current = es
+
+    es.addEventListener('fields', (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        // 立即更新标题和基本字段
+        setContract(prev => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            title: data.title || prev.title,
+          }
+        })
+      } catch {}
+    })
+
+    es.addEventListener('chunk', (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        setStreamingSummary(prev => prev + (data.text || ''))
+      } catch {}
+    })
+
+    es.addEventListener('done', () => {
+      es.close()
+      sseRef.current = null
+      setIsLlmParsing(false)
+      setIsReparsing(false)
+      // 重新加载合同数据以获取最终状态
+      contractApi.get(contractId).then(result => {
+        if (result.data) {
+          setContract(result.data as unknown as Contract)
+          setStreamingSummary('')
+        }
+      })
+    })
+
+    es.addEventListener('error', () => {
+      es.close()
+      sseRef.current = null
+      setIsLlmParsing(false)
+      setIsReparsing(false)
+    })
+
+    es.onerror = () => {
+      es.close()
+      sseRef.current = null
+      setIsLlmParsing(false)
+      setIsReparsing(false)
+    }
+  }
+
+  // 清理SSE连接
+  useEffect(() => {
+    return () => {
+      if (sseRef.current) {
+        sseRef.current.close()
+      }
+    }
+  }, [])
+
+  // OA合同解析轮询（OA合同使用旧的reparse接口，需要轮询）
+  useEffect(() => {
+    if (!isLlmParsing || !id || contract?.source !== 'oa_import') return
+
     let pollCount = 0
-    const maxPolls = 24 // 最多轮询24次（2分钟）
-    
+    const maxPolls = 60
+
     const interval = setInterval(async () => {
       pollCount++
-      
       const result = await contractApi.get(id)
       if (result.data) {
         const c = result.data as unknown as Contract
-        if (isLlmSummary(c.summary)) {
-          setContract(c)
+        setContract(c)
+        let parseComplete = false
+        if ((c as any).extractedData) {
+          try {
+            const ed = JSON.parse((c as any).extractedData)
+            if ((ed.llm_summary && ed.llm_summary.length > 50) || (ed.parsed_summary && ed.parsed_summary.length > 50)) {
+              parseComplete = true
+            }
+          } catch {}
+        }
+        if (parseComplete || pollCount >= maxPolls) {
           setIsLlmParsing(false)
-        } else if (pollCount >= maxPolls) {
-          // 超时，停止轮询
-          console.log('LLM解析超时，停止轮询')
-          setContract(c)
-          setIsLlmParsing(false)
+          setIsReparsing(false)
         }
       }
     }, 5000)
-    
+
     return () => clearInterval(interval)
-  }, [isLlmParsing, id])
+  }, [isLlmParsing, id, contract?.source])
 
   const handleEdit = () => {
     if (!contract) return
@@ -210,7 +454,7 @@ export function ContractDetail() {
     if (!confirm('确定要删除这份合同吗？此操作不可恢复。')) return
     
     setIsDeleting(true)
-    const result = await contractApi.delete(id)
+    const result = await contractApi.delete(Number(id))
     if (result.data) {
       navigate('/contracts')
     } else {
@@ -237,34 +481,33 @@ export function ContractDetail() {
     setIsAnalyzing(false)
   }
 
-  const loadContractText = async () => {
-    if (!id) return
-    setLoadingText(true)
-    const result = await contractApi.getText(Number(id))
-    if (result.data) {
-      setContractText(result.data.text || '')
-      setContractStructured(result.data.structured || null)
-    }
-    setLoadingText(false)
-  }
-
   const handleReparse = async () => {
     if (!id) return
 
     setIsReparsing(true)
+    // 直接启动SSE流式解析（非OA合同）
+    startParseStream(id)
+  }
+
+  const handleAnalyzeOaAttachment = async () => {
+    if (!id) return
+
+    // 优先使用当前选中的附件，否则使用主附件
+    const targetAttachment = selectedAttachment || attachments.find(a => a.is_primary) || attachments[0]
+    if (!targetAttachment) return
+
+    setIsReparsing(true)
     setIsLlmParsing(true)
     try {
-      const result = await contractApi.reparse(Number(id))
+      const result = await contractApi.analyzeAttachment(Number(id), targetAttachment.id)
       if (result) {
-        // 立即重新加载合同数据，显示基础解析结果
         const contractResult = await contractApi.get(id)
         if (contractResult.data) {
           setContract(contractResult.data as unknown as Contract)
         }
-        // 不再弹窗提示，让轮询机制自动检测LLM解析完成
       }
     } catch (error) {
-      alert('重新解析失败: ' + (error as Error).message)
+      alert('分析附件失败: ' + (error as Error).message)
       setIsLlmParsing(false)
     }
     setIsReparsing(false)
@@ -324,6 +567,151 @@ export function ContractDetail() {
     }
   }
 
+  // 处理附件上传
+  const handleAttachmentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !id) return
+    setUploadingAttachment(true)
+    try {
+      const token = localStorage.getItem('token')
+      const formData = new FormData()
+      formData.append('file', file)
+      const resp = await fetch(`/api/v1/contracts/${id}/attachments/upload`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData,
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error(err.detail || '上传失败')
+      }
+      // 刷新附件列表
+      await loadAttachments(id)
+    } catch (err) {
+      alert(`上传失败: ${(err as Error).message}`)
+    } finally {
+      setUploadingAttachment(false)
+      if (uploadInputRef.current) uploadInputRef.current.value = ''
+    }
+  }
+
+  // 处理附件预览 - 在页面内预览
+  const handleAttachmentPreview = async (attachment: any) => {
+    if (!attachment) return
+    
+    const fileName = attachment.file_name.toLowerCase()
+    const ext = fileName.split('.').pop()
+    
+    setIsLoadingAttachment(true)
+    setAttachmentError(null)
+    setWordArrayBuffer(null)
+    
+    try {
+      // 清理之前的预览URL
+      if (attachmentPreviewUrl) {
+        window.URL.revokeObjectURL(attachmentPreviewUrl)
+        setAttachmentPreviewUrl('')
+      }
+      
+      // 通过后端API获取附件
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/download`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `获取附件失败 (HTTP ${response.status})`)
+      }
+      
+      const blob = await response.blob()
+      
+      // 验证blob是否为有效的文件内容
+      console.log(`附件信息 - 名称: ${attachment.file_name}, 大小: ${blob.size} bytes, 类型: ${blob.type}`)
+      
+      // 检查是否为错误响应（如HTML错误页面）
+      if (blob.type === 'text/html' || blob.type === 'application/json') {
+        const text = await blob.text()
+        console.error('响应内容:', text)
+        throw new Error('服务器返回错误响应，请检查附件是否存在')
+      }
+      
+      // 对于.docx文档，验证是否为有效的ZIP文件
+      if (ext === 'docx') {
+        const arrayBuffer = await blob.arrayBuffer()
+        const view = new Uint8Array(arrayBuffer)
+        const header = view.slice(0, 4)
+        const headerHex = Array.from(header).map(b => b.toString(16).padStart(2, '0')).join('')
+        console.log(`Word文件头: ${headerHex}`)
+        
+        const isValidDocx = header[0] === 0x50 && header[1] === 0x4B  // PK (ZIP)
+        if (!isValidDocx) {
+          console.error('无效的.docx文件格式')
+          throw new Error(`无效的Word文件格式 (文件头: ${headerHex})，可能是旧版.doc格式`)
+        }
+      }
+      
+      // 根据文件类型设置预览类型
+      if (ext === 'docx') {
+        // .docx文档：读取为ArrayBuffer，通过renderAsync渲染
+        setAttachmentPreviewType('word')
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          const arrayBuffer = e.target?.result as ArrayBuffer
+          console.log(`Word文件已读取，大小: ${arrayBuffer.byteLength} bytes`)
+          setWordArrayBuffer(arrayBuffer)
+          setIsLoadingAttachment(false)
+        }
+        reader.onerror = () => {
+          setAttachmentError('读取Word文件失败')
+          setIsLoadingAttachment(false)
+        }
+        reader.readAsArrayBuffer(blob)
+      } else if (ext === 'doc') {
+        // .doc 文件：通过后端转 PDF 后预览
+        try {
+          const pdfResponse = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/preview-pdf`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          })
+          if (!pdfResponse.ok) {
+            const errData = await pdfResponse.json().catch(() => ({}))
+            throw new Error(errData.detail || '.doc 转 PDF 失败')
+          }
+          const pdfBlob = await pdfResponse.blob()
+          const url = window.URL.createObjectURL(pdfBlob)
+          setAttachmentPreviewUrl(url)
+          setAttachmentPreviewType('pdf')
+          setIsLoadingAttachment(false)
+        } catch (docErr) {
+          setAttachmentPreviewType('unknown')
+          setAttachmentError(`.doc 转 PDF 预览失败: ${(docErr as Error).message}，请下载后查看`)
+          setIsLoadingAttachment(false)
+        }
+      } else if (ext === 'pdf') {
+        // PDF和图片：使用Blob URL
+        const url = window.URL.createObjectURL(blob)
+        setAttachmentPreviewUrl(url)
+        setAttachmentPreviewType('pdf')
+        setIsLoadingAttachment(false)
+      } else if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext || '')) {
+        const url = window.URL.createObjectURL(blob)
+        setAttachmentPreviewUrl(url)
+        setAttachmentPreviewType('image')
+        setIsLoadingAttachment(false)
+      } else {
+        setAttachmentPreviewType('unknown')
+        setAttachmentError('不支持的文件格式，请下载后查看')
+        setIsLoadingAttachment(false)
+      }
+    } catch (error) {
+      console.error('预览附件失败:', error)
+      setAttachmentError(`预览附件失败: ${(error as Error).message}`)
+      setIsLoadingAttachment(false)
+    }
+  }
+
   const getStatusBadge = (status?: string, endDate?: string) => {
     if (!status || !endDate) return null
     
@@ -341,7 +729,7 @@ export function ContractDetail() {
   }
 
   const getRiskBadge = (severity: string) => {
-    const variants = {
+    const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'success' | 'warning'> = {
       low: 'success',
       medium: 'warning',
       high: 'destructive',
@@ -362,21 +750,6 @@ export function ContractDetail() {
   const formatDate = (date: string | null | undefined) => {
     if (!date) return '-'
     return date.split('T')[0]
-  }
-
-  const getParties = (parties: string | string[] | unknown) => {
-    if (typeof parties === 'string') {
-      try {
-        const parsed = JSON.parse(parties)
-        return Array.isArray(parsed) ? parsed.join(', ') : parties
-      } catch {
-        return parties
-      }
-    }
-    if (Array.isArray(parties)) {
-      return parties.join(', ')
-    }
-    return String(parties || '-')
   }
 
   // 分离甲方、乙方、丙方显示（支持三方合同）
@@ -487,6 +860,16 @@ export function ContractDetail() {
           >
             操作记录
           </button>
+          <button
+            onClick={() => { setActiveTab('payments'); fetchContractPayments(); }}
+            className={`pb-3 px-1 border-b-2 transition-colors ${
+              activeTab === 'payments'
+                ? 'border-primary text-primary font-medium'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            付款记录
+          </button>
         </div>
       </div>
 
@@ -501,7 +884,7 @@ export function ContractDetail() {
                     编辑
                   </Button>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="space-y-6">
                   <div className="grid grid-cols-2 gap-6">
                     <div className="flex items-start gap-3">
                       <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
@@ -572,128 +955,675 @@ export function ContractDetail() {
                       </div>
                     </div>
                   </div>
-                </CardContent>
-              </Card>
 
-              <Card className={`ai-analyzing-card ${isLlmParsing || isReparsing ? "is-loading" : ""}`}>
-                <CardHeader className="flex flex-row items-center justify-between">
-                  <CardTitle>主要合作内容与付款方式</CardTitle>
-                  {isLlmParsing || isReparsing ? (
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Sparkles className="h-4 w-4 animate-spin text-primary" />
-                      <span>AI正在智能解析中，请稍候...</span>
+                  {/* 主要合作内容与付款方式 */}
+                  <div className="border-t pt-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h4 className="text-sm font-semibold">主要合作内容与付款方式</h4>
+                      {isLlmParsing || isReparsing ? (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <Sparkles className="h-3 w-3 animate-spin text-primary" />
+                          <span>AI正在智能解析中...</span>
+                        </div>
+                      ) : contract.source === 'oa_import' ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleAnalyzeOaAttachment}
+                          disabled={attachments.length === 0}
+                          title={selectedAttachment ? `解析: ${selectedAttachment.file_name}` : attachments.find(a => a.is_primary)?.file_name ? `解析主附件: ${attachments.find(a => a.is_primary)?.file_name}` : ''}
+                        >
+                          <Sparkles className="h-3 w-3 mr-1" />
+                          合同解析
+                        </Button>
+                      ) : (
+                        <Button variant="outline" size="sm" onClick={handleReparse}>
+                          <Sparkles className="h-3 w-3 mr-1" />
+                          重新解析
+                        </Button>
+                      )}
                     </div>
-                  ) : (
-                    <Button variant="outline" size="sm" onClick={handleReparse}>
-                      <Sparkles className="h-4 w-4 mr-2" />
-                      重新解析
-                    </Button>
-                  )}
-                </CardHeader>
-                <CardContent>
-                  <div className="prose prose-sm max-w-none dark:prose-invert prose-headings:text-foreground prose-p:text-muted-foreground prose-li:text-muted-foreground prose-strong:text-foreground prose-td:text-muted-foreground prose-th:text-foreground">
-                    {contract.summary ? (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          table: ({ children }) => (
-                            <div className="overflow-x-auto my-4">
-                              <table className="w-full text-sm border-collapse border border-border">
-                                {children}
-                              </table>
-                            </div>
-                          ),
-                          thead: ({ children }) => (
-                            <thead className="bg-muted">{children}</thead>
-                          ),
-                          th: ({ children }) => (
-                            <th className="border border-border px-3 py-2 text-left font-medium">{children}</th>
-                          ),
-                          td: ({ children }) => (
-                            <td className="border border-border px-3 py-2">{children}</td>
-                          ),
-                          tr: ({ children }) => (
-                            <tr className="hover:bg-muted/50">{children}</tr>
-                          ),
-                        }}
-                      >
+                    <div className="bg-muted rounded-lg p-4 max-h-[30vh] overflow-auto">
+                      <div className="prose prose-sm max-w-none dark:prose-invert prose-headings:text-foreground prose-p:text-muted-foreground prose-li:text-muted-foreground prose-strong:text-foreground prose-td:text-muted-foreground prose-th:text-foreground">
                         {(() => {
-                          // 预处理：将嵌套在列表项内的Markdown表格提取为独立段落
-                          const lines = contract.summary.split('\n')
-                          const result: string[] = []
-                          let i = 0
-                          while (i < lines.length) {
-                            const trimmed = lines[i].trimStart()
-                            // 检测以 | 开头的表格行（可能被缩进或嵌套在列表中）
-                            if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
-                              // 收集连续的表格行
-                              const tableLines: string[] = []
-                              while (i < lines.length) {
-                                const t = lines[i].trimStart()
-                                if (t.startsWith('|') && t.endsWith('|')) {
-                                  tableLines.push(t) // 去掉缩进
-                                  i++
-                                } else {
-                                  break
-                                }
+                          // 流式输出优先显示
+                          if (streamingSummary) {
+                            return (
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}
+                                components={{
+                                  table: ({ children }) => <div className="overflow-x-auto my-4"><table className="w-full text-sm border-collapse border border-border">{children}</table></div>,
+                                  thead: ({ children }) => <thead className="bg-muted">{children}</thead>,
+                                  th: ({ children }) => <th className="border border-border px-3 py-2 text-left font-medium">{children}</th>,
+                                  td: ({ children }) => <td className="border border-border px-3 py-2">{children}</td>,
+                                  tr: ({ children }) => <tr className="hover:bg-muted/50">{children}</tr>,
+                                }}
+                              >{streamingSummary}</ReactMarkdown>
+                            )
+                          }
+
+                          // 对于OA导入的合同，从extracted_data.llm_summary读取LLM生成的摘要
+                          let displaySummary = contract.summary
+                          if (contract.source === 'oa_import' && contract.extractedData) {
+                            try {
+                              const extracted = JSON.parse(contract.extractedData)
+                              if (extracted.llm_summary) {
+                                displaySummary = extracted.llm_summary
+                              } else if (extracted.parsed_summary) {
+                                displaySummary = extracted.parsed_summary
                               }
-                              // 在表格前后插入空行，确保作为独立块解析
-                              result.push('')
-                              result.push(...tableLines)
-                              result.push('')
-                            } else {
-                              result.push(lines[i])
-                              i++
+                            } catch {
+                              // 如果解析失败，使用原始summary
                             }
                           }
-                          return result.join('\n')
+                          
+                          return displaySummary ? (
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                table: ({ children }) => (
+                                  <div className="overflow-x-auto my-4">
+                                    <table className="w-full text-sm border-collapse border border-border">
+                                      {children}
+                                    </table>
+                                  </div>
+                                ),
+                                thead: ({ children }) => (
+                                  <thead className="bg-muted">{children}</thead>
+                                ),
+                                th: ({ children }) => (
+                                  <th className="border border-border px-3 py-2 text-left font-medium">{children}</th>
+                                ),
+                                td: ({ children }) => (
+                                  <td className="border border-border px-3 py-2">{children}</td>
+                                ),
+                                tr: ({ children }) => (
+                                  <tr className="hover:bg-muted/50">{children}</tr>
+                                ),
+                              }}
+                            >
+                              {displaySummary}
+                            </ReactMarkdown>
+                          ) : (
+                            <p className="text-muted-foreground text-sm">暂无内容</p>
+                          )
                         })()}
-                      </ReactMarkdown>
-                    ) : (
-                      <p className="text-muted-foreground">暂无内容</p>
-                    )}
+                      </div>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
+
+              {/* OA流程概况（如果是从OA导入的合同） */}
+              {contract.source === 'oa_import' && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>OA流程概况</CardTitle>
+                    <CardDescription>从OA系统导入的流程信息</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {(() => {
+                      // 解析raw_data中的OA字段
+                      let oaRaw: Record<string, any> = {}
+                      if ((contract as any).rawData) {
+                        try {
+                          oaRaw = typeof (contract as any).rawData === 'string' 
+                            ? JSON.parse((contract as any).rawData) 
+                            : (contract as any).rawData
+                        } catch {}
+                      }
+                      return (
+                        <>
+                          {/* 流程基本信息 */}
+                          <div className="mb-6">
+                            <h4 className="text-sm font-semibold mb-3">流程基本信息</h4>
+                            <div className="grid grid-cols-2 gap-6">
+                              {oaRaw['doc_subject'] && (
+                                <div className="flex items-start gap-3 col-span-2">
+                                  <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">OA主题</p>
+                                    <p className="font-medium">{oaRaw['doc_subject']}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.applicant && (
+                                <div className="flex items-start gap-3">
+                                  <User className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">申请人</p>
+                                    <p className="font-medium">{contract.applicant}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {(oaRaw['申请人岗位'] || contract.position) && (
+                                <div className="flex items-start gap-3">
+                                  <User className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">申请人岗位</p>
+                                    <p className="font-medium">{oaRaw['申请人岗位'] || contract.position}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.department && (
+                                <div className="flex items-start gap-3">
+                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">发起部门</p>
+                                    <p className="font-medium">{contract.department}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.company && (
+                                <div className="flex items-start gap-3">
+                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">我方公司</p>
+                                    <p className="font-medium">{contract.company}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.counterparty && (
+                                <div className="flex items-start gap-3">
+                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">对方单位</p>
+                                    <p className="font-medium">{contract.counterparty}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.counterpartyContact && (
+                                <div className="flex items-start gap-3">
+                                  <User className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">对方联系人</p>
+                                    <p className="font-medium">{contract.counterpartyContact}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.counterpartyAddress && (
+                                <div className="flex items-start gap-3">
+                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">对方地址</p>
+                                    <p className="font-medium">{contract.counterpartyAddress}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.amount && (
+                                <div className="flex items-start gap-3">
+                                  <DollarSign className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">合同金额</p>
+                                    <p className="font-medium">{formatAmount(contract.amount, contract.currency)}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.paymentType && (
+                                <div className="flex items-start gap-3">
+                                  <DollarSign className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">付款方式</p>
+                                    <p className="font-medium">{contract.paymentType}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.copies && (
+                                <div className="flex items-start gap-3">
+                                  <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">合同份数</p>
+                                    <p className="font-medium">{contract.copies}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {oaRaw['是否为已审批定稿制式业务合同'] && (
+                                <div className="flex items-start gap-3">
+                                  <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">是否制式合同</p>
+                                    <p className="font-medium">{oaRaw['是否为已审批定稿制式业务合同']}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.signedDate && (
+                                <div className="flex items-start gap-3">
+                                  <Calendar className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">签订时间</p>
+                                    <p className="font-medium">{formatDate(contract.signedDate)}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {contract.startDate && contract.endDate && (
+                                <div className="flex items-start gap-3">
+                                  <Calendar className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                  <div>
+                                    <p className="text-sm text-muted-foreground">有效期</p>
+                                    <p className="font-medium">
+                                      {formatDate(contract.startDate)} ~ {formatDate(contract.endDate)}
+                                    </p>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* OA审批流程信息 */}
+                          {(oaRaw['doc_status'] || oaRaw['node_name'] || oaRaw['当前处理人'] || oaRaw['已经处理人']) && (
+                            <div className="mb-6 pt-4 border-t">
+                              <h4 className="text-sm font-semibold mb-3">审批流程信息</h4>
+                              <div className="grid grid-cols-2 gap-6">
+                                {oaRaw['doc_status'] && (
+                                  <div className="flex items-start gap-3">
+                                    <AlertTriangle className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                    <div>
+                                      <p className="text-sm text-muted-foreground">OA文档状态</p>
+                                      <p className="font-medium">{oaRaw['doc_status']}</p>
+                                    </div>
+                                  </div>
+                                )}
+                                {oaRaw['node_name'] && (
+                                  <div className="flex items-start gap-3">
+                                    <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                    <div>
+                                      <p className="text-sm text-muted-foreground">当前审批节点</p>
+                                      <p className="font-medium">{oaRaw['node_name']}</p>
+                                    </div>
+                                  </div>
+                                )}
+                                {oaRaw['handler_name'] && oaRaw['handler_name'] !== '<无>' && (
+                                  <div className="flex items-start gap-3">
+                                    <User className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                    <div>
+                                      <p className="text-sm text-muted-foreground">当前处理人</p>
+                                      <p className="font-medium">{oaRaw['当前处理人'] || oaRaw['handler_name']}</p>
+                                    </div>
+                                  </div>
+                                )}
+                                {oaRaw['已经处理人'] && (
+                                  <div className="flex items-start gap-3">
+                                    <User className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                    <div>
+                                      <p className="text-sm text-muted-foreground">已处理人</p>
+                                      <p className="font-medium">{oaRaw['已经处理人']}</p>
+                                    </div>
+                                  </div>
+                                )}
+                                {oaRaw['模板名称'] && (
+                                  <div className="flex items-start gap-3 col-span-2">
+                                    <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
+                                    <div>
+                                      <p className="text-sm text-muted-foreground">OA流程模板</p>
+                                      <p className="font-medium">{oaRaw['模板名称']}</p>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )
+                    })()}
+                    
+                    {/* 申请摘要 - OA合同只显示原始事由说明 */}
+                    {(() => {
+                      let oaSummary = ''
+                      // 优先级1：从rawData['合同摘要']读取（最可靠的OA原始数据源）
+                      let oaRawForSummary: Record<string, any> = {}
+                      if ((contract as any).rawData) {
+                        try {
+                          oaRawForSummary = typeof (contract as any).rawData === 'string'
+                            ? JSON.parse((contract as any).rawData)
+                            : (contract as any).rawData
+                        } catch {}
+                      }
+                      if (oaRawForSummary['合同摘要']) {
+                        oaSummary = oaRawForSummary['合同摘要']
+                      }
+                      // 优先级2：从extracted_data.oa_original_summary
+                      if (!oaSummary && contract.extractedData) {
+                        try {
+                          const ed = JSON.parse(contract.extractedData)
+                          if (ed.oa_original_summary) oaSummary = ed.oa_original_summary
+                        } catch {}
+                      }
+                      // 优先级3：contract.summary（但排除LLM内容和错误信息）
+                      if (!oaSummary && contract.summary) {
+                        const s = contract.summary
+                        if (!s.startsWith('正在解析') && !s.startsWith('附件文本提取') && !s.startsWith('## ') && !s.startsWith('### ') && s !== '由AI自动解析提取') {
+                          oaSummary = s
+                        }
+                      }
+                      return oaSummary ? (
+                        <div className="pt-4 border-t">
+                          <h4 className="text-sm font-semibold mb-3">申请摘要</h4>
+                          <div className="whitespace-pre-wrap">
+                            {oaSummary}
+                          </div>
+                        </div>
+                      ) : null
+                    })()}
+                  </CardContent>
+                </Card>
+              )}
 
               {/* 补充协议列表 */}
               {id && <SupplementList contractId={parseInt(id)} />}
 
               {/* 付款管理列表 */}
               {id && <PaymentList contractId={parseInt(id)} />}
+
+              {/* 注意：OA合同的附件在右侧附件清单中显示，不使用ContractAttachments组件 */}
         </div>
 
         <div className="space-y-6">
+          {/* 附件清单（OA导入的合同） */}
+          {contract?.source === 'oa_import' && attachments.length > 0 && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>附件清单 ({attachments.length})</CardTitle>
+                    <CardDescription>选择要预览或解析的附件</CardDescription>
+                  </div>
+                  <div>
+                    <input
+                      ref={uploadInputRef}
+                      type="file"
+                      className="hidden"
+                      accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.bmp,.webp,.xls,.xlsx"
+                      onChange={handleAttachmentUpload}
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={uploadingAttachment}
+                      onClick={() => uploadInputRef.current?.click()}
+                    >
+                      <Upload className="h-4 w-4 mr-1" />
+                      {uploadingAttachment ? '上传中...' : '上传附件'}
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {attachments.map((att) => (
+                    <div
+                      key={att.id}
+                      className={`flex items-center justify-between p-3 border rounded cursor-pointer transition-colors ${
+                        selectedAttachment?.id === att.id
+                          ? 'bg-primary/10 border-primary'
+                          : 'hover:bg-gray-50'
+                      }`}
+                      onClick={() => {
+                        setSelectedAttachment(att)
+                        setAttachmentError(null)
+                        setIsLoadingAttachment(false)
+                        handleAttachmentPreview(att)
+                      }}
+                    >
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium truncate flex items-center gap-2">
+                            {att.file_name}
+                            <Badge variant="outline" className="text-xs">OA</Badge>
+                          </div>
+                          <div className="text-sm text-gray-500">
+                            {(att.file_size / 1024).toFixed(2)} KB
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {selectedAttachment?.id === att.id && (
+                          <Badge variant="default">预览中</Badge>
+                        )}
+                        {att.is_primary ? (
+                          <Badge variant="default" className="text-xs bg-primary">主附件</Badge>
+                        ) : (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-xs border-primary text-primary hover:bg-primary hover:text-white"
+                            onClick={async (e) => {
+                              e.stopPropagation()
+                              try {
+                                const token = localStorage.getItem('token')
+                                const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}/set-primary`, {
+                                  method: 'PUT',
+                                  headers: {
+                                    'Authorization': `Bearer ${token}`
+                                  }
+                                })
+                                if (response.ok) {
+                                  // 重新加载附件列表（会自动排序主附件到最上方）
+                                  loadAttachments(id!)
+                                }
+                              } catch (error) {
+                                console.error('设置主附件失败:', error)
+                              }
+                            }}
+                          >
+                            ★ 设为主附件
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* 非OA合同的附件上传入口 */}
+          {contract?.source !== 'oa_import' && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <CardTitle>附件</CardTitle>
+                  <div>
+                    <input
+                      ref={uploadInputRef}
+                      type="file"
+                      className="hidden"
+                      accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.bmp,.webp,.xls,.xlsx"
+                      onChange={handleAttachmentUpload}
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={uploadingAttachment}
+                      onClick={() => uploadInputRef.current?.click()}
+                    >
+                      <Upload className="h-4 w-4 mr-1" />
+                      {uploadingAttachment ? '上传中...' : '上传附件'}
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              {attachments.length > 0 && (
+                <CardContent>
+                  <div className="space-y-2">
+                    {attachments.map((att) => (
+                      <div
+                        key={att.id}
+                        className={`flex items-center justify-between p-3 border rounded cursor-pointer transition-colors ${
+                          selectedAttachment?.id === att.id ? 'bg-primary/10 border-primary' : 'hover:bg-gray-50'
+                        }`}
+                        onClick={() => {
+                          setSelectedAttachment(att)
+                          setAttachmentError(null)
+                          setIsLoadingAttachment(false)
+                          handleAttachmentPreview(att)
+                        }}
+                      >
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium truncate">{att.file_name}</div>
+                            <div className="text-sm text-gray-500">{(att.file_size / 1024).toFixed(2)} KB</div>
+                          </div>
+                        </div>
+                        {selectedAttachment?.id === att.id && <Badge variant="default">预览中</Badge>}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              )}
+            </Card>
+          )}
+
           <Card>
-            <CardHeader>
-              <CardTitle>合同预览</CardTitle>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle>
+                {selectedAttachment ? `附件预览 - ${selectedAttachment.file_name}` : '合同预览'}
+              </CardTitle>
+              {((selectedAttachment && attachmentPreviewType === 'word') || (!selectedAttachment && mainPreviewType === 'word')) && (
+                <div className="flex items-center gap-2 text-sm">
+                  <button onClick={() => setWordZoom(Math.max(50, wordZoom - 10))} className="px-2 py-1 rounded border hover:bg-muted" title="缩小">−</button>
+                  <span className="w-12 text-center">{wordZoom}%</span>
+                  <button onClick={() => setWordZoom(Math.min(200, wordZoom + 10))} className="px-2 py-1 rounded border hover:bg-muted" title="放大">+</button>
+                  <button onClick={() => setWordZoom(100)} className="px-2 py-1 rounded border hover:bg-muted text-xs" title="重置">重置</button>
+                </div>
+              )}
             </CardHeader>
             <CardContent>
-              {contract?.fileUrl ? (
+              {contract?.fileUrl || contract?.source === 'oa_import' || selectedAttachment ? (
                 <div className="space-y-4">
-                  <div className="aspect-[3/4] bg-muted rounded-lg overflow-hidden">
-                    {previewUrl ? (
-                      <iframe
-                        src={previewUrl}
-                        className="w-full h-full"
-                        title="合同预览"
-                      />
+                  <div className="bg-muted rounded-lg overflow-auto" style={{ height: '70vh' }}>
+                    {selectedAttachment && (attachmentPreviewUrl || attachmentPreviewType === 'word') ? (
+                      // 附件预览
+                      <>
+                        {isLoadingAttachment && (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <div className="flex flex-col items-center gap-4">
+                              <div className="w-8 h-8 border-2 border-zinc-300 border-t-zinc-900 rounded-full animate-spin" />
+                              <p className="text-sm text-muted-foreground font-medium">正在加载文档...</p>
+                            </div>
+                          </div>
+                        )}
+                        
+                        {attachmentError && (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <div className="text-center">
+                              <AlertTriangle className="h-16 w-16 mx-auto text-destructive mb-4" />
+                              <p className="text-muted-foreground mb-2">预览失败</p>
+                              <p className="text-sm text-muted-foreground">{attachmentError}</p>
+                            </div>
+                          </div>
+                        )}
+                        
+                        {!isLoadingAttachment && !attachmentError && (
+                          <>
+                            {attachmentPreviewType === 'pdf' && (
+                              <iframe
+                                src={attachmentPreviewUrl}
+                                className="w-full h-full"
+                                title="附件预览"
+                              />
+                            )}
+                            {attachmentPreviewType === 'image' && (
+                              <div className="w-full h-full flex items-center justify-center bg-black">
+                                <img
+                                  src={attachmentPreviewUrl}
+                                  alt={selectedAttachment.file_name}
+                                  className="max-w-full max-h-full object-contain"
+                                />
+                              </div>
+                            )}
+                            {attachmentPreviewType === 'word' && (
+                              <div 
+                                ref={wordDocxContainerRef}
+                                className="docx-preview-wrapper w-full h-full overflow-auto p-4 md:p-8 bg-white"
+                                style={{ zoom: `${wordZoom}%` }}
+                              />
+                            )}
+                            {attachmentPreviewType === 'unknown' && (
+                              <div className="w-full h-full flex items-center justify-center">
+                                <div className="text-center">
+                                  <FileText className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+                                  <p className="text-muted-foreground">不支持的文件格式</p>
+                                  <p className="text-sm text-muted-foreground mt-2">
+                                    请下载后查看
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </>
+                    ) : (previewUrl || mainPreviewType === 'word') ? (
+                      // 主合同预览 - 支持PDF/Word/图片
+                      <>
+                        {mainPreviewType === 'pdf' && (
+                          <iframe
+                            src={previewUrl}
+                            className="w-full h-full"
+                            title="合同预览"
+                          />
+                        )}
+                        {mainPreviewType === 'image' && (
+                          <div className="w-full h-full flex items-center justify-center bg-black">
+                            <img
+                              src={previewUrl}
+                              alt={contract?.title || '合同预览'}
+                              className="max-w-full max-h-full object-contain"
+                            />
+                          </div>
+                        )}
+                        {mainPreviewType === 'word' && (
+                          <div 
+                            ref={mainWordContainerRef}
+                            className="docx-preview-wrapper w-full h-full overflow-auto p-4 md:p-8 bg-white"
+                            style={{ zoom: `${wordZoom}%` }}
+                          />
+                        )}
+                      </>
+                    ) : contract?.source === 'oa_import' ? (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <div className="text-center">
+                          <FileText className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+                          <p className="text-muted-foreground">OA导入的合同</p>
+                          <p className="text-sm text-muted-foreground mt-2">
+                            请从上方附件清单中选择要预览的文件
+                          </p>
+                        </div>
+                      </div>
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
                         <p className="text-muted-foreground">加载预览中...</p>
                       </div>
                     )}
                   </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" className="flex-1" onClick={handlePreview}>
-                      <FileText className="h-4 w-4 mr-2" />
-                      预览
-                    </Button>
-                    <Button variant="outline" className="flex-1" onClick={handleDownload}>
-                      <Download className="h-4 w-4 mr-2" />
-                      下载
-                    </Button>
-                  </div>
+                  
+                  {contract?.source !== 'oa_import' && !selectedAttachment && (
+                    <div className="flex gap-2">
+                      <Button variant="outline" className="flex-1" onClick={handlePreview}>
+                        <FileText className="h-4 w-4 mr-2" />
+                        预览
+                      </Button>
+                      <Button variant="outline" className="flex-1" onClick={handleDownload}>
+                        <Download className="h-4 w-4 mr-2" />
+                        下载
+                      </Button>
+                    </div>
+                  )}
+                  {selectedAttachment && (
+                    <div className="flex gap-2">
+                      <Button 
+                        variant="outline" 
+                        className="flex-1"
+                        onClick={() => {
+                          setSelectedAttachment(null)
+                          setAttachmentPreviewUrl('')
+                        }}
+                      >
+                        <ArrowLeft className="h-4 w-4 mr-2" />
+                        返回主合同
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="aspect-[3/4] bg-muted rounded-lg flex items-center justify-center">
@@ -782,6 +1712,57 @@ export function ContractDetail() {
         </Card>
       )}
 
+      {activeTab === 'payments' && (
+        <Card>
+          <CardHeader>
+            <CardTitle>关联付款记录</CardTitle>
+            <CardDescription>与此合同关联的所有付款记录</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {paymentsLoading ? (
+              <div className="text-center py-8 text-muted-foreground">加载中...</div>
+            ) : contractPayments.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                暂无关联的付款记录
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>付款主题</TableHead>
+                    <TableHead>申请日期</TableHead>
+                    <TableHead>付款金额</TableHead>
+                    <TableHead>经办人</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {contractPayments.map((payment) => (
+                    <TableRow key={payment.id}>
+                      <TableCell className="font-medium">
+                        <Link to={`/payments/${payment.id}`} className="hover:underline text-primary">
+                          {payment.payment_theme}
+                        </Link>
+                      </TableCell>
+                      <TableCell>{payment.payment_date || '-'}</TableCell>
+                      <TableCell>
+                        {payment.amount != null ? new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(payment.amount) : '-'}
+                      </TableCell>
+                      <TableCell>{payment.operator || '-'}</TableCell>
+                      <TableCell className="text-right">
+                        <Button variant="ghost" size="sm" asChild>
+                          <Link to={`/payments/${payment.id}`}>查看详情</Link>
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       <Dialog open={isEditing} onOpenChange={setIsEditing}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
@@ -800,12 +1781,20 @@ export function ContractDetail() {
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <Label htmlFor="contractType">合同类型</Label>
-                <Input
+                <select
                   id="contractType"
                   value={editForm.contractType}
                   onChange={(e) => setEditForm({...editForm, contractType: e.target.value})}
-                  placeholder="请输入合同类型"
-                />
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                >
+                  <option value="">请选择合同类型</option>
+                  {contractTypes.map(t => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                  {editForm.contractType && !contractTypes.includes(editForm.contractType) && (
+                    <option value={editForm.contractType}>{editForm.contractType}</option>
+                  )}
+                </select>
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="department">发起部门</Label>

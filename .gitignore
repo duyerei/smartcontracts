@@ -44,6 +44,8 @@ yarn-error.log*
 
 # 数据库
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
@@ -76,5 +78,37 @@ htmlcov/
 /secure/
 admin_password.txt
 .env
-.env
-.env
+.env.production
+backend/.env.production
+
+# 自动生成的说明文档（根目录和子目录中的中文md）
+/*.md
+!CLAUDE.md
+!README.md
+frontend/*.md
+backend/*.md
+
+# 测试/调试脚本
+backend/check_*.py
+backend/test_*.py
+backend/debug_*.py
+backend/find_*.py
+backend/list_*.py
+backend/import_*.py
+backend/manual_*.py
+backend/migrate_*.py
+backend/reset_*.py
+backend/diagnose_*.py
+frontend_test_guide.md
+
+# 其他不需要的文件
+*.zip
+*.png
+error.png
+baidu.png
+smart_contracts_import/
+universal-file-previewer/
+合同列表参考效果/
+create-version.*
+upload-to-github.*
+fix-env-tracking.ps1
