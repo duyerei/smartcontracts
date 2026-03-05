@@ -91,6 +91,16 @@ export function ContractList() {
     return () => clearTimeout(timer)
   }, [searchQuery])
 
+  // 如果列表中有"解析中..."的合同，每5秒自动刷新
+  useEffect(() => {
+    const hasParsing = contracts.some(c => c.title === '解析中...')
+    if (!hasParsing) return
+    const timer = setInterval(() => {
+      loadContracts()
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [contracts])
+
   // 构建树形渲染列表：补充协议合同插入到主合同行后面
   const flatRows = useMemo(() => {
     const rows: Array<{ contract: any; isChild: boolean }> = []
@@ -338,7 +348,18 @@ export function ContractList() {
                                 <div className="w-7 flex-shrink-0" />
                               </>
                             )}
-                            <span className="truncate">{contract.title}</span>
+                            <span className="truncate">
+                              {contract.title === '解析中...' ? (
+                                <span className="inline-flex items-center gap-1.5 text-primary">
+                                  <span className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                                  正在解析中...
+                                </span>
+                              ) : contract.title === '解析失败' ? (
+                                <span className="text-destructive">{contract.title}</span>
+                              ) : (
+                                contract.title
+                              )}
+                            </span>
                             {!isChild && (contract as any).supplement_children?.length > 0 && (
                               <span className="flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-200">主</span>
                             )}

@@ -437,6 +437,145 @@ def get_contract(
         "raw_data": contract.raw_data,
     }
 
+def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
+    """后台线程：完整的 OCR提取 + 正则解析 + LLM增强"""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        contract = db.query(Contract).filter(Contract.id == contract_id).first()
+        if not contract:
+            return
+
+        print(f"[异步解析] 开始解析合同 {contract_id}, 文件: {file_path}")
+
+        # 第1步：OCR + 正则解析
+        parse_result = contract_parser.parse_contract(file_path, metadata_hint)
+        extracted = parse_result["data"]
+        raw_text = parse_result.get("raw_text", "")
+        note = parse_result.get("note", "")
+
+        # 更新基础字段
+        contract.contract_number = extracted["contract_number"]
+        contract.title = extracted["title"]
+        contract.contract_type = extracted["contract_type"]
+        contract.department = extracted["department"]
+        contract.parties = json.dumps(extracted["parties"], ensure_ascii=False)
+        contract.amount = extracted["amount"]
+        contract.raw_text = raw_text
+        contract.extracted_data = json.dumps(extracted, ensure_ascii=False)
+
+        if extracted.get("signed_date"):
+            try:
+                contract.signed_date = datetime.strptime(extracted["signed_date"], "%Y-%m-%d")
+            except Exception:
+                pass
+        if extracted.get("start_date"):
+            try:
+                contract.start_date = datetime.strptime(extracted["start_date"], "%Y-%m-%d")
+            except Exception:
+                pass
+        if extracted.get("end_date"):
+            try:
+                contract.end_date = datetime.strptime(extracted["end_date"], "%Y-%m-%d")
+            except Exception:
+                pass
+
+        # 生成基础摘要
+        if note:
+            contract.summary = "需要手动填写信息 - " + note
+        else:
+            contract.summary = _generate_contract_summary(extracted, raw_text)
+
+        contract.updated_at = datetime.now()
+        db.commit()
+        print(f"[异步解析] 合同 {contract_id} OCR+正则解析完成, title={contract.title}, text_len={len(raw_text)}")
+
+        # 第2步：LLM增强（如果有文本且非OCR失败）
+        if raw_text and not note:
+            _async_llm_process_with_db(db, contract, raw_text)
+
+    except Exception as e:
+        print(f"[异步解析] 合同 {contract_id} 解析失败: {e}")
+        # 标记解析失败
+        try:
+            contract = db.query(Contract).filter(Contract.id == contract_id).first()
+            if contract and contract.title == "解析中...":
+                contract.title = "解析失败"
+                contract.summary = f"自动解析失败: {str(e)}"
+                contract.updated_at = datetime.now()
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def _async_llm_process_with_db(db, contract, raw_text: str):
+    """在已有db session中执行LLM增强（供_async_full_parse调用）"""
+    try:
+        # 提取结构化字段
+        llm_result = llm_service.llm_service.parse_contract_with_llm(raw_text)
+        if llm_result:
+            llm_title = llm_result.get("合同名称", "")
+            if _is_valid_llm_value(llm_title):
+                contract.title = llm_title
+
+            parties_list = []
+            for key in ["甲方", "乙方"]:
+                v = llm_result.get(key)
+                if _is_valid_llm_value(v):
+                    parties_list.append(v)
+            if llm_result.get("丙方") and _is_valid_llm_value(llm_result["丙方"]):
+                parties_list.append(llm_result["丙方"])
+            if parties_list:
+                contract.parties = json.dumps(parties_list, ensure_ascii=False)
+
+            if llm_result.get("服务费用总额"):
+                amount_str = str(llm_result["服务费用总额"])
+                numbers = re.findall(r'[\d]+\.?\d*', amount_str.replace(',', '').replace('，', ''))
+                if numbers:
+                    try:
+                        contract.amount = float(numbers[0])
+                    except Exception:
+                        pass
+
+            def _try_parse_date(date_str):
+                if not date_str or date_str in (None, "null", ""):
+                    return None
+                for fmt in ["%Y-%m-%d", "%Y-%m", "%Y/%m/%d", "%Y/%m"]:
+                    try:
+                        return datetime.strptime(str(date_str), fmt)
+                    except Exception:
+                        continue
+                return None
+
+            if "签订日期" in llm_result:
+                d = _try_parse_date(llm_result["签订日期"])
+                if d:
+                    contract.signed_date = d
+            if "服务期限开始日期" in llm_result:
+                d = _try_parse_date(llm_result["服务期限开始日期"])
+                if d:
+                    contract.start_date = d
+            if "服务期限结束日期" in llm_result:
+                d = _try_parse_date(llm_result["服务期限结束日期"])
+                if d:
+                    contract.end_date = d
+    except Exception as e:
+        print(f"[异步] LLM结构化字段提取失败: {e}")
+
+    try:
+        llm_summary = llm_service.llm_service.extract_full_summary(raw_text)
+        if llm_summary:
+            contract.summary = llm_summary
+    except Exception as e:
+        print(f"[异步] LLM摘要提取失败: {e}")
+
+    contract.updated_at = datetime.now()
+    db.commit()
+    print(f"[异步] 合同 {contract.id} LLM处理完成")
+
+
 def _async_llm_process(contract_id: int, raw_text: str):
     """后台线程：异步执行LLM摘要提取 + 结构化字段更新"""
     from app.database import SessionLocal
@@ -538,70 +677,55 @@ async def upload_contract(
     try:
         file_path, relative_path = await file_storage.save_contract(file)
         
-        parse_result = contract_parser.parse_contract(file_path, metadata_hint or "")
+        # 生成临时合同编号
+        contract_number = f"CT-{datetime.now().strftime('%Y%m%d')}-{datetime.now().strftime('%H%M%S')}"
         
-        if not parse_result["success"]:
-            raise HTTPException(status_code=400, detail=f"合同解析失败: {parse_result['error']}")
-        
-        extracted = parse_result["data"]
-        raw_text = parse_result.get("raw_text", "")
-        note = parse_result.get("note", "")
-
-        # 先用正则生成基础摘要，快速返回
-        if note:
-            summary = "需要手动填写信息 - " + note
-        else:
-            summary = _generate_contract_summary(extracted, raw_text)
-        
+        # 立即创建合同记录（标记为解析中），快速返回
         contract = Contract(
-            contract_number=extracted["contract_number"],
-            title=extracted["title"],
-            contract_type=extracted["contract_type"],
-            department=extracted["department"],
+            contract_number=contract_number,
+            title="解析中...",
+            contract_type="其他",
+            department="其他",
             status="待审核",
-            parties=json.dumps(extracted["parties"], ensure_ascii=False),
-            amount=extracted["amount"],
+            parties="[]",
+            amount=None,
             currency="CNY",
-            signed_date=datetime.strptime(extracted["signed_date"], "%Y-%m-%d") if extracted.get("signed_date") else None,
-            start_date=datetime.strptime(extracted["start_date"], "%Y-%m-%d") if extracted.get("start_date") else None,
-            end_date=datetime.strptime(extracted["end_date"], "%Y-%m-%d") if extracted.get("end_date") else None,
             file_path=relative_path,
             original_filename=file.filename,
-            summary=summary,
-            raw_text=raw_text,
-            extracted_data=json.dumps(extracted, ensure_ascii=False)
+            summary="正在进行OCR识别与智能解析，请稍候...",
+            raw_text="",
+            extracted_data=json.dumps({"parsing": True}, ensure_ascii=False)
         )
         
         db.add(contract)
         db.commit()
         db.refresh(contract)
 
-        # LLM摘要放到后台线程异步执行，不阻塞上传响应
-        # 使用非daemon线程，确保任务有机会完成
-        if raw_text and not note:
-            import threading
-            t = threading.Thread(target=_async_llm_process, args=(contract.id, raw_text))
-            t.daemon = False
-            t.start()
-        
-        extract_data = ExtractData(
-            contract_number=extracted["contract_number"],
-            title=extracted["title"],
-            parties=extracted["parties"],
-            amount=extracted["amount"],
-            contract_type=extracted["contract_type"],
-            department=extracted["department"],
-            start_date=extracted.get("start_date"),
-            end_date=extracted.get("end_date")
+        # OCR + 解析 + LLM 全部放到后台线程异步执行
+        import threading
+        t = threading.Thread(
+            target=_async_full_parse,
+            args=(contract.id, str(file_storage.get_file_path(relative_path)), metadata_hint or "")
         )
+        t.daemon = False
+        t.start()
         
         return UploadResponse(
             contract_id=contract.id,
             contract_number=contract.contract_number,
             file_path=relative_path,
-            message="合同上传成功，AI正在后台解析摘要",
-            note=note if note else None,
-            extracted_data=extract_data
+            message="合同上传成功，正在后台解析中",
+            note=None,
+            extracted_data=ExtractData(
+                contract_number=contract_number,
+                title="解析中...",
+                parties=[],
+                amount=None,
+                contract_type="其他",
+                department="其他",
+                start_date=None,
+                end_date=None
+            )
         )
         
     except Exception as e:
