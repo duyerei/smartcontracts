@@ -1096,20 +1096,18 @@ export function ContractDetail() {
                 </CardContent>
               </Card>
 
-              {/* 合同概况（所有合同都显示） */}
-              {(true) && (
+              {/* OA流程信息（仅OA导入合同显示） */}
+              {contract.source === 'oa_import' && (
                 <Card>
                   <CardHeader className="flex flex-row items-center justify-between">
                     <div>
-                      <CardTitle>合同概况</CardTitle>
-                      <CardDescription>{contract.source === 'oa_import' ? '从OA系统导入的流程信息' : '合同基本概况信息'}</CardDescription>
+                      <CardTitle>OA流程信息</CardTitle>
+                      <CardDescription>从OA系统导入的流程信息</CardDescription>
                     </div>
-                    {contract.source === 'oa_import' && (
-                      <Button variant="outline" size="sm" onClick={() => setShowPaymentPdfImport(true)}>
-                        <Upload className="h-4 w-4 mr-2" />
-                        导入流程表单PDF
-                      </Button>
-                    )}
+                    <Button variant="outline" size="sm" onClick={() => setShowPaymentPdfImport(true)}>
+                      <Upload className="h-4 w-4 mr-2" />
+                      导入流程表单PDF
+                    </Button>
                   </CardHeader>
                   <CardContent>
                     {(() => {
@@ -1121,6 +1119,17 @@ export function ContractDetail() {
                             ? JSON.parse((contract as any).rawData) 
                             : (contract as any).rawData
                         } catch {}
+                      }
+                      // 判断是否有OA流程数据（rawData非空且有实际字段）
+                      const hasOaData = Object.keys(oaRaw).length > 0 && (
+                        oaRaw['doc_subject'] || contract.applicant || contract.department || 
+                        contract.company || contract.counterparty || contract.amount ||
+                        oaRaw['doc_status'] || oaRaw['node_name']
+                      )
+                      if (!hasOaData) {
+                        return (
+                          <p className="text-muted-foreground text-sm">尚未导入流程表单PDF，请点击上方按钮导入</p>
+                        )
                       }
                       return (
                         <>

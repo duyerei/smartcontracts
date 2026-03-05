@@ -14,14 +14,32 @@ from app.auth import get_current_user
 router = APIRouter(prefix="/partners", tags=["合作伙伴"])
 
 
+def _normalize_name(name: str) -> str:
+    """标准化合作伙伴名称：统一全角/半角括号等"""
+    import re
+    name = name.strip()
+    name = name.replace('（', '(').replace('）', ')')
+    name = re.sub(r'\s+', '', name)  # 去除所有空白
+    return name
+
+
 def _extract_partner_names(parties_json: str) -> list:
-    """从合同parties字段提取合作伙伴名称列表"""
+    """从合同parties字段提取合作伙伴名称列表（去重）"""
     if not parties_json:
         return []
     try:
         parties = json.loads(parties_json) if isinstance(parties_json, str) else parties_json
         if isinstance(parties, list):
-            return [str(p).strip() for p in parties if p and str(p).strip() not in ("待填写", "null", "None", "未识别")]
+            seen = set()
+            result = []
+            for p in parties:
+                if not p or str(p).strip() in ("待填写", "null", "None", "未识别"):
+                    continue
+                normalized = _normalize_name(str(p))
+                if normalized not in seen:
+                    seen.add(normalized)
+                    result.append(str(p).strip())
+            return result
     except Exception:
         pass
     return []
@@ -110,17 +128,19 @@ def sync_partners_from_contracts(
     ).all()
 
     created = 0
+    # 预加载所有已有合作伙伴名称（标准化）
+    existing_partners = db.query(Partner).filter(Partner.is_deleted == False).all()
+    existing_normalized = {_normalize_name(p.name) for p in existing_partners}
+
     for contract in contracts:
         names = _extract_partner_names(contract.parties)
         for name in names:
             if not name or len(name) < 2:
                 continue
-            existing = db.query(Partner).filter(
-                Partner.name == name,
-                Partner.is_deleted == False
-            ).first()
-            if not existing:
+            normalized = _normalize_name(name)
+            if normalized not in existing_normalized:
                 db.add(Partner(name=name))
+                existing_normalized.add(normalized)
                 created += 1
 
     db.commit()
