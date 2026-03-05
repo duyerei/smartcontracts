@@ -1581,7 +1581,7 @@ export function ContractDetail() {
                       </div>
                     ))}
                   </div>
-                </CardContent>
+              </CardContent>
             </Card>
           )}
 
