@@ -10,6 +10,7 @@ import {
   LogOut,
   Download,
   CreditCard,
+  Building2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
@@ -17,6 +18,7 @@ import { useAuth } from '@/contexts/AuthContext'
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: '工作台' },
   { to: '/contracts', icon: FileText, label: '合同管理' },
+  { to: '/partners', icon: Building2, label: '合作伙伴' },
   { to: '/payments', icon: CreditCard, label: '付款管理' },
   { to: '/upload', icon: Upload, label: '上传合同' },
   { to: '/search', icon: Search, label: '智能搜索' },

@@ -420,3 +420,55 @@ export const paymentManagementApi = {
     }
   },
 }
+
+export interface PartnerRecord {
+  id: number
+  name: string
+  contact_name?: string
+  contact_phone?: string
+  address?: string
+  bank_name?: string
+  bank_account?: string
+  notes?: string
+  contract_count?: number
+  created_at?: string
+  updated_at?: string
+  contracts?: any[]
+  attachments?: any[]
+}
+
+export const partnerApi = {
+  list: async (params: { page?: number; page_size?: number; search?: string } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.page) sp.set('page', String(params.page))
+    if (params.page_size) sp.set('page_size', String(params.page_size))
+    if (params.search) sp.set('search', params.search)
+    return fetchApi<{ partners: PartnerRecord[]; total: number }>(`/partners?${sp.toString()}`)
+  },
+  get: async (id: number) => fetchApi<PartnerRecord>(`/partners/${id}`),
+  create: async (data: Partial<PartnerRecord>) =>
+    fetchApi<{ id: number; message: string }>('/partners', { method: 'POST', body: JSON.stringify(data) }),
+  update: async (id: number, data: Partial<PartnerRecord>) =>
+    fetchApi<{ message: string }>(`/partners/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: async (id: number) =>
+    fetchApi<{ message: string }>(`/partners/${id}`, { method: 'DELETE' }),
+  syncFromContracts: async () =>
+    fetchApi<{ message: string }>('/partners/sync-from-contracts'),
+  uploadAttachment: async (partnerId: number, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const token = localStorage.getItem('token')
+    const response = await fetch(`${API_BASE_URL}/partners/${partnerId}/attachments`, {
+      method: 'POST',
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: formData,
+    })
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error(err.detail || '上传失败')
+    }
+    return response.json()
+  },
+  deleteAttachment: async (partnerId: number, attId: number) =>
+    fetchApi<{ message: string }>(`/partners/${partnerId}/attachments/${attId}`, { method: 'DELETE' }),
+}

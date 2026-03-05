@@ -11,6 +11,8 @@ import { Login } from '@/pages/Login'
 import { UserManagement } from '@/pages/UserManagement'
 import { PaymentManagementList } from '@/pages/PaymentManagementList'
 import { PaymentManagementDetail } from '@/pages/PaymentManagementDetail'
+import { PartnerList } from '@/pages/PartnerList'
+import { PartnerDetail } from '@/pages/PartnerDetail'
 import { useAuth } from '@/contexts/AuthContext'
 import type { ReactNode } from 'react'
 
@@ -82,6 +84,14 @@ const routes = [
       {
         path: 'payments/:id',
         element: <PaymentManagementDetail />,
+      },
+      {
+        path: 'partners',
+        element: <PartnerList />,
+      },
+      {
+        path: 'partners/:id',
+        element: <PartnerDetail />,
       },
     ],
   },

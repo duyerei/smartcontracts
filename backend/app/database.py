@@ -105,6 +105,34 @@ class Payment(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class Partner(Base):
+    __tablename__ = "partners"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False, index=True)  # 合作伙伴名称
+    contact_name = Column(String(100), nullable=True)       # 联系人
+    contact_phone = Column(String(50), nullable=True)       # 联系电话
+    address = Column(String(500), nullable=True)            # 地址
+    bank_name = Column(String(200), nullable=True)          # 开户行
+    bank_account = Column(String(100), nullable=True)       # 银行账号
+    notes = Column(Text, nullable=True)                     # 备注
+    is_deleted = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class PartnerAttachment(Base):
+    __tablename__ = "partner_attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    partner_id = Column(Integer, index=True)
+    file_name = Column(String(500))
+    file_path = Column(String(500))
+    file_size = Column(Integer, nullable=True)
+    is_deleted = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+
 class ContractAttachment(Base):
     __tablename__ = "contract_attachments"
     
