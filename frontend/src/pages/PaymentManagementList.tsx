@@ -1,15 +1,20 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { 
   Search, 
   Download,
+  Upload,
   FileText,
   Calendar,
   DollarSign,
   User,
   ChevronLeft,
   ChevronRight,
-  ArrowUpDown
+  ArrowUpDown,
+  X,
+  CheckCircle,
+  AlertCircle,
+  Loader2
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -46,6 +51,13 @@ export function PaymentManagementList() {
   const [searchQuery, setSearchQuery] = useState('')
   const [sortField, setSortField] = useState<string>('payment_date')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+
+  // PDF导入状态
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<{ success: boolean; message: string; detail?: string } | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const fetchPayments = async () => {
     setLoading(true)
@@ -132,16 +144,52 @@ export function PaymentManagementList() {
       : <ArrowUpDown className="h-4 w-4 ml-1" />
   }
 
+  const handleImportPdf = async () => {
+    if (!importFile) return
+    setImporting(true)
+    setImportResult(null)
+    try {
+      const result = await paymentManagementApi.importPdf(importFile)
+      if (result.error) {
+        setImportResult({ success: false, message: result.error })
+      } else {
+        const autoLinked = result.data?.auto_linked
+        setImportResult({
+          success: true,
+          message: '导入成功',
+          detail: autoLinked ? `已自动关联合同（${result.data?.parsed_data?.contract_number}）` : '未找到匹配合同，可手动关联'
+        })
+        fetchPayments()
+      }
+    } catch (e: any) {
+      setImportResult({ success: false, message: e.message || '导入失败' })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleCloseImport = () => {
+    setShowImportDialog(false)
+    setImportFile(null)
+    setImportResult(null)
+  }
+
   const totalPages = Math.ceil(total / pageSize)
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">付款管理</h1>
-        <Button variant="outline">
-          <Download className="h-4 w-4 mr-2" />
-          导出
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setShowImportDialog(true)}>
+            <Upload className="h-4 w-4 mr-2" />
+            导入付款PDF
+          </Button>
+          <Button variant="outline">
+            <Download className="h-4 w-4 mr-2" />
+            导出
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -303,6 +351,89 @@ export function PaymentManagementList() {
           </div>
         </CardContent>
       </Card>
+
+      {/* 导入付款PDF对话框 */}
+      {showImportDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">导入OA付款申请PDF</h2>
+              <button onClick={handleCloseImport} className="text-gray-400 hover:text-gray-600">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <p className="text-sm text-muted-foreground">
+              将OA系统中的付款申请表单导出为PDF，上传后系统将自动解析付款信息并创建记录。
+            </p>
+
+            {!importResult ? (
+              <>
+                <div
+                  className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition-colors"
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    const f = e.dataTransfer.files[0]
+                    if (f?.name.toLowerCase().endsWith('.pdf')) setImportFile(f)
+                  }}
+                >
+                  <FileText className="h-10 w-10 mx-auto text-gray-400 mb-2" />
+                  {importFile ? (
+                    <p className="text-sm font-medium text-blue-600">{importFile.name}</p>
+                  ) : (
+                    <p className="text-sm text-gray-500">点击或拖拽PDF文件到此处</p>
+                  )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf"
+                    className="hidden"
+                    onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                  />
+                </div>
+
+                <div className="flex gap-2 justify-end">
+                  <Button variant="outline" onClick={handleCloseImport}>取消</Button>
+                  <Button onClick={handleImportPdf} disabled={!importFile || importing}>
+                    {importing ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />解析中...</>
+                    ) : (
+                      <><Upload className="h-4 w-4 mr-2" />开始导入</>
+                    )}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-4">
+                <div className={`flex items-start gap-3 p-4 rounded-lg ${importResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
+                  {importResult.success
+                    ? <CheckCircle className="h-5 w-5 text-green-600 mt-0.5 shrink-0" />
+                    : <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 shrink-0" />
+                  }
+                  <div>
+                    <p className={`font-medium ${importResult.success ? 'text-green-800' : 'text-red-800'}`}>
+                      {importResult.message}
+                    </p>
+                    {importResult.detail && (
+                      <p className="text-sm mt-1 text-gray-600">{importResult.detail}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <Button variant="outline" onClick={handleCloseImport}>关闭</Button>
+                  {importResult.success && (
+                    <Button onClick={() => { setImportFile(null); setImportResult(null) }}>
+                      继续导入
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

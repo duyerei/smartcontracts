@@ -5,10 +5,12 @@ from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel
 import os
+import tempfile
 
 from app.database import get_db, Payment, Contract, ContractAttachment, User
 from app.auth import get_current_user
 from app.services import file_storage
+from app.services.payment_parser import payment_parser
 
 router = APIRouter(prefix="/payments", tags=["付款管理"])
 
@@ -34,6 +36,96 @@ class PaymentManagementResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+@router.post("/management/import-pdf", response_model=dict)
+async def import_payment_pdf(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """上传OA付款申请PDF，自动解析并创建付款记录"""
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="请上传PDF文件")
+
+    tmp_path = None
+    try:
+        # 读取文件内容并保存到临时文件
+        content = await file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+            tmp_path = tmp.name
+            tmp.write(content)
+
+        # 解析PDF
+        result = payment_parser.parse_payment_pdf(tmp_path)
+        if not result.get("success"):
+            raise HTTPException(status_code=422, detail=result.get("error", "PDF解析失败，请检查文件内容"))
+
+        data = result["data"]
+
+        # 保存PDF文件到正式存储（payments子目录）
+        import uuid
+        from pathlib import Path
+        file_id = str(uuid.uuid4())
+        payments_dir = Path("/app/storage/payments")
+        payments_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = payments_dir / f"{file_id}.pdf"
+        with open(dest_path, "wb") as f_out:
+            f_out.write(content)
+        file_path = str(dest_path)
+        file_size = len(content)
+
+        # 解析付款日期
+        payment_date = None
+        if data.get("payment_date"):
+            try:
+                payment_date = datetime.strptime(data["payment_date"], "%Y-%m-%d")
+            except Exception:
+                pass
+
+        # 自动匹配合同
+        contract_id = None
+        if data.get("contract_number"):
+            contract = db.query(Contract).filter(
+                Contract.contract_number == data["contract_number"],
+                Contract.is_deleted == False
+            ).first()
+            if contract:
+                contract_id = contract.id
+
+        # 创建付款记录
+        payment = Payment(
+            contract_id=contract_id,
+            payment_theme=data.get("payment_theme") or file.filename,
+            operator=data.get("operator"),
+            department=data.get("department"),
+            payment_date=payment_date,
+            application_number=data.get("application_number"),
+            contract_number=data.get("contract_number"),
+            project_name=data.get("project_name"),
+            cost_center=data.get("cost_center"),
+            payment_reason=data.get("payment_reason"),
+            amount=data.get("amount"),
+            counterparty=data.get("counterparty"),
+            description=data.get("payment_theme") or file.filename,
+            file_path=file_path,
+            file_size=file_size,
+        )
+        db.add(payment)
+        db.commit()
+        db.refresh(payment)
+
+        return {
+            "message": "导入成功",
+            "payment_id": payment.id,
+            "contract_id": contract_id,
+            "auto_linked": contract_id is not None,
+            "parsed_data": data,
+        }
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @router.get("/management/list", response_model=dict)

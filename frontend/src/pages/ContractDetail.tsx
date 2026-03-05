@@ -70,6 +70,12 @@ export function ContractDetail() {
   const [contractTypes, setContractTypes] = useState<string[]>([])
   const [uploadingAttachment, setUploadingAttachment] = useState(false)
   const uploadInputRef = useRef<HTMLInputElement>(null)
+  // 付款PDF导入弹窗状态
+  const [showPaymentPdfImport, setShowPaymentPdfImport] = useState(false)
+  const [paymentPdfFile, setPaymentPdfFile] = useState<File | null>(null)
+  const [importingPaymentPdf, setImportingPaymentPdf] = useState(false)
+  const [paymentPdfResult, setPaymentPdfResult] = useState<{ success: boolean; message: string; detail?: string } | null>(null)
+  const paymentPdfInputRef = useRef<HTMLInputElement>(null)
   const [editForm, setEditForm] = useState({
     title: '',
     contractType: '',
@@ -1056,9 +1062,15 @@ export function ContractDetail() {
               {/* OA流程概况（如果是从OA导入的合同） */}
               {contract.source === 'oa_import' && (
                 <Card>
-                  <CardHeader>
-                    <CardTitle>OA流程概况</CardTitle>
-                    <CardDescription>从OA系统导入的流程信息</CardDescription>
+                  <CardHeader className="flex flex-row items-center justify-between">
+                    <div>
+                      <CardTitle>OA流程概况</CardTitle>
+                      <CardDescription>从OA系统导入的流程信息</CardDescription>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => setShowPaymentPdfImport(true)}>
+                      <Upload className="h-4 w-4 mr-2" />
+                      导入流程表单PDF
+                    </Button>
                   </CardHeader>
                   <CardContent>
                     {(() => {
@@ -1900,6 +1912,88 @@ export function ContractDetail() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 付款流程表单PDF导入弹窗 */}
+      {showPaymentPdfImport && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">导入付款流程表单PDF</h2>
+              <button onClick={() => { setShowPaymentPdfImport(false); setPaymentPdfFile(null); setPaymentPdfResult(null) }} className="text-gray-400 hover:text-gray-600">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              将OA系统中的付款申请表单导出为PDF，上传后系统将自动解析并创建付款记录，并自动关联到当前合同。
+            </p>
+            {!paymentPdfResult ? (
+              <>
+                <div
+                  className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition-colors"
+                  onClick={() => paymentPdfInputRef.current?.click()}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    const f = e.dataTransfer.files[0]
+                    if (f?.name.toLowerCase().endsWith('.pdf')) setPaymentPdfFile(f)
+                  }}
+                >
+                  <FileText className="h-10 w-10 mx-auto text-gray-400 mb-2" />
+                  {paymentPdfFile ? (
+                    <p className="text-sm font-medium text-blue-600">{paymentPdfFile.name}</p>
+                  ) : (
+                    <p className="text-sm text-gray-500">点击或拖拽PDF文件到此处</p>
+                  )}
+                  <input ref={paymentPdfInputRef} type="file" accept=".pdf" className="hidden"
+                    onChange={(e) => setPaymentPdfFile(e.target.files?.[0] || null)} />
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <Button variant="outline" onClick={() => { setShowPaymentPdfImport(false); setPaymentPdfFile(null) }}>取消</Button>
+                  <Button onClick={async () => {
+                    if (!paymentPdfFile) return
+                    setImportingPaymentPdf(true)
+                    try {
+                      const result = await paymentManagementApi.importPdf(paymentPdfFile)
+                      if (result.error) {
+                        setPaymentPdfResult({ success: false, message: result.error })
+                      } else {
+                        // 如果解析出的合同编号与当前合同不匹配，手动关联
+                        const paymentId = result.data?.payment_id
+                        if (paymentId && !result.data?.auto_linked && id) {
+                          await paymentManagementApi.linkContract(paymentId, Number(id))
+                        }
+                        setPaymentPdfResult({ success: true, message: '导入成功', detail: '付款记录已创建并关联到当前合同' })
+                        fetchContractPayments()
+                      }
+                    } catch (e: any) {
+                      setPaymentPdfResult({ success: false, message: e.message || '导入失败' })
+                    } finally {
+                      setImportingPaymentPdf(false)
+                    }
+                  }} disabled={!paymentPdfFile || importingPaymentPdf}>
+                    {importingPaymentPdf ? '解析中...' : '开始导入'}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-4">
+                <div className={`flex items-start gap-3 p-4 rounded-lg ${paymentPdfResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
+                  <div>
+                    <p className={`font-medium ${paymentPdfResult.success ? 'text-green-800' : 'text-red-800'}`}>{paymentPdfResult.message}</p>
+                    {paymentPdfResult.detail && <p className="text-sm mt-1 text-gray-600">{paymentPdfResult.detail}</p>}
+                  </div>
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <Button variant="outline" onClick={() => { setShowPaymentPdfImport(false); setPaymentPdfFile(null); setPaymentPdfResult(null) }}>关闭</Button>
+                  {paymentPdfResult.success && (
+                    <Button onClick={() => { setPaymentPdfFile(null); setPaymentPdfResult(null) }}>继续导入</Button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
