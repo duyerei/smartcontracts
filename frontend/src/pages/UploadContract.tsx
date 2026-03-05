@@ -35,6 +35,7 @@ interface UploadFile {
   file: File
   status: 'pending' | 'uploading' | 'processing' | 'completed' | 'error'
   progress: number
+  contractId?: number
   extractedData?: {
     contractNumber?: string
     title?: string
@@ -76,11 +77,13 @@ export function UploadContract() {
     try {
       const result = await api.upload(uploadFile.file)
       const data = result.data || result
+      const contractId = data.contract_id
       setFiles(p => p.map(f =>
         f.id === uploadFile.id ? {
           ...f,
           status: 'completed' as const,
           progress: 100,
+          contractId,
           extractedData: {
             contractNumber: data.contract_number || '',
             title: data.extracted_data?.title || uploadFile.file.name.replace('.pdf', ''),
@@ -90,6 +93,10 @@ export function UploadContract() {
           }
         } : f
       ))
+      // 单文件上传时自动跳转到详情页
+      if (contractId) {
+        setTimeout(() => navigate(`/contracts/${contractId}?autoparse=1`), 800)
+      }
     } catch (error) {
       setFiles(p => p.map(f =>
         f.id === uploadFile.id ? {

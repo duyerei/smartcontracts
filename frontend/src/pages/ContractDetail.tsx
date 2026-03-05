@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate, useLocation } from 'react-router-dom'
 import { renderAsync } from 'docx-preview'
 import { 
   ArrowLeft, 
@@ -41,6 +41,7 @@ import type { Contract } from '@/types'
 export function ContractDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const [contract, setContract] = useState<Contract | null>(null)
   const [loading, setLoading] = useState(true)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
@@ -107,7 +108,6 @@ export function ContractDetail() {
       if (result.data) {
         const c = result.data as unknown as Contract
         setContract(c)
-        // 不再自动触发LLM解析，只有用户主动点击"合同解析"按钮时才解析
         
         // 只有非OA导入的合同才加载主文件预览
         if (c.source !== 'oa_import') {
@@ -116,6 +116,16 @@ export function ContractDetail() {
         
         // 加载附件列表（OA合同和普通合同都加载）
         loadAttachments(id)
+
+        // 如果是从上传页跳转过来（autoparse=1），且合同还在解析中，自动触发SSE解析
+        const searchParams = new URLSearchParams(location.search)
+        if (searchParams.get('autoparse') === '1' && c.source !== 'oa_import') {
+          // 标题还是"解析中..."说明后台异步解析还没完成，等待后台完成即可
+          // 如果后台已完成（title不是解析中），直接启动SSE重新解析以获取LLM摘要
+          if (c.title !== '解析中...') {
+            setTimeout(() => startParseStream(id), 500)
+          }
+        }
       }
       setLoading(false)
     }
@@ -403,6 +413,33 @@ export function ContractDetail() {
 
     return () => clearInterval(interval)
   }, [isLlmParsing, id, contract?.source])
+
+  // 普通合同"解析中..."轮询：后台异步解析完成后自动刷新并触发SSE
+  useEffect(() => {
+    if (!contract || contract.title !== '解析中...' || contract.source === 'oa_import') return
+    if (!id) return
+
+    let pollCount = 0
+    const maxPolls = 60
+
+    const interval = setInterval(async () => {
+      pollCount++
+      const result = await contractApi.get(id)
+      if (result.data) {
+        const c = result.data as unknown as Contract
+        if (c.title !== '解析中...' || pollCount >= maxPolls) {
+          setContract(c)
+          clearInterval(interval)
+          // 后台OCR+正则解析完成，自动触发SSE LLM解析
+          if (c.title !== '解析中...' && c.title !== '解析失败') {
+            startParseStream(id)
+          }
+        }
+      }
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, [contract?.title, id])
 
   const handleEdit = () => {
     if (!contract) return
@@ -1059,20 +1096,20 @@ export function ContractDetail() {
                 </CardContent>
               </Card>
 
-              {/* OA流程概况（如果是从OA导入的合同） */}
-              {contract.source === 'oa_import' && (
+              {/* 合同概况（所有合同都显示） */}
+              {(true) && (
                 <Card>
                   <CardHeader className="flex flex-row items-center justify-between">
                     <div>
-                      <CardTitle>OA流程概况</CardTitle>
-                      <CardDescription>从OA系统导入的流程信息</CardDescription>
+                      <CardTitle>合同概况</CardTitle>
+                      <CardDescription>{contract.source === 'oa_import' ? '从OA系统导入的流程信息' : '合同基本概况信息'}</CardDescription>
                     </div>
-                    <Button variant="outline" size="sm" onClick={() => setShowPaymentPdfImport(true)}>
-                      <Upload className="h-4 w-4 mr-2" />
-                      导入流程表单PDF
-                    </Button>
-                  </CardHeader>
-                  <CardContent>
+                    {contract.source === 'oa_import' && (
+                      <Button variant="outline" size="sm" onClick={() => setShowPaymentPdfImport(true)}>
+                        <Upload className="h-4 w-4 mr-2" />
+                        导入流程表单PDF
+                      </Button>
+                    )}                  <CardContent>
                     {(() => {
                       // 解析raw_data中的OA字段
                       let oaRaw: Record<string, any> = {}
@@ -1521,9 +1558,16 @@ export function ContractDetail() {
 
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle>
-                {selectedAttachment ? `附件预览 - ${selectedAttachment.file_name}` : '合同预览'}
-              </CardTitle>
+              <div className="flex-1 min-w-0">
+                <CardTitle className="truncate">
+                  {selectedAttachment
+                    ? selectedAttachment.file_name
+                    : contract?.originalFilename || contract?.title || '合同预览'}
+                </CardTitle>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {selectedAttachment ? '附件预览' : '合同主文件预览'}
+                </p>
+              </div>
               {((selectedAttachment && attachmentPreviewType === 'word') || (!selectedAttachment && mainPreviewType === 'word')) && (
                 <div className="flex items-center gap-2 text-sm">
                   <button onClick={() => setWordZoom(Math.max(50, wordZoom - 10))} className="px-2 py-1 rounded border hover:bg-muted" title="缩小">−</button>
