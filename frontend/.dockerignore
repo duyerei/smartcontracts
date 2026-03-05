@@ -1,8 +1,7 @@
 node_modules
 dist
 *.md
-*.html
-!index.html
+!README.md
 .env
 .env.local
 test-*
@@ -10,4 +9,3 @@ tsconfig.tsbuildinfo
 tsconfig.node.tsbuildinfo
 vite.config.d.ts
 vite.config.js
-vite.config.d.ts
