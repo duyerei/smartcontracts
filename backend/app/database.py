@@ -39,6 +39,7 @@ class Contract(Base):
     start_date = Column(DateTime, nullable=True)
     end_date = Column(DateTime, nullable=True)
     file_path = Column(String(500))
+    original_filename = Column(String(500), nullable=True)  # 上传时的原始文件名
     summary = Column(Text, nullable=True)
     risk_level = Column(String(20), nullable=True)
     risk_analysis = Column(Text, nullable=True)

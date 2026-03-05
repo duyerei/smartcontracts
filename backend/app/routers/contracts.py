@@ -352,6 +352,7 @@ def list_contracts(
             "start_date": c.start_date.isoformat() if c.start_date else None,
             "end_date": c.end_date.isoformat() if c.end_date else None,
             "file_path": c.file_path or "",
+            "original_filename": c.original_filename if hasattr(c, 'original_filename') else "",
             "summary": c.summary if not is_child else None,
             "risk_level": c.risk_level if not is_child else None,
             "created_at": c.created_at,
@@ -415,6 +416,7 @@ def get_contract(
         "start_date": contract.start_date.isoformat() if contract.start_date else None,
         "end_date": contract.end_date.isoformat() if contract.end_date else None,
         "file_path": contract.file_path or "",
+        "original_filename": contract.original_filename or "",
         "summary": contract.summary,
         "risk_level": contract.risk_level,
         "risk_analysis": contract.risk_analysis,
@@ -564,6 +566,7 @@ async def upload_contract(
             start_date=datetime.strptime(extracted["start_date"], "%Y-%m-%d") if extracted.get("start_date") else None,
             end_date=datetime.strptime(extracted["end_date"], "%Y-%m-%d") if extracted.get("end_date") else None,
             file_path=relative_path,
+            original_filename=file.filename,
             summary=summary,
             raw_text=raw_text,
             extracted_data=json.dumps(extracted, ensure_ascii=False)

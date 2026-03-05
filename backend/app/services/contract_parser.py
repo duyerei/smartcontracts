@@ -14,7 +14,13 @@ class ContractParser:
     def parse_contract(self, file_path: str, metadata_hint: str = "") -> Dict[str, Any]:
         text = self.ocr.extract_text_from_file(file_path)
         
-        if not text or "失败" in text or "异常" in text or "未能识别" in text:
+        # 仅在文本为空或极短且明确是错误信息时才判定失败
+        # 避免合同正文中包含"失败""异常"等词被误判
+        is_ocr_failure = (
+            not text 
+            or len(text.strip()) < 50 and ("失败" in text or "异常" in text or "未能识别" in text)
+        )
+        if is_ocr_failure:
             return {
                 "success": True,
                 "text_length": 0,

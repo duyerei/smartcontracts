@@ -40,6 +40,8 @@ export interface Contract {
   createdAt: string
   updatedAt: string
   fileUrl: string
+  filePath?: string
+  originalFilename?: string
   riskLevel?: 'low' | 'medium' | 'high'
   summary?: string
   riskAnalysis?: string

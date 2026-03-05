@@ -1442,9 +1442,43 @@ export function ContractDetail() {
                   </div>
                 </div>
               </CardHeader>
-              {attachments.length > 0 && (
-                <CardContent>
+              <CardContent>
                   <div className="space-y-2">
+                    {/* 显示合同主文件 */}
+                    {contract?.filePath && (
+                      <div
+                        className={`flex items-center justify-between p-3 border rounded cursor-pointer transition-colors ${
+                          !selectedAttachment ? 'bg-primary/10 border-primary' : 'hover:bg-gray-50'
+                        }`}
+                        onClick={() => {
+                          setSelectedAttachment(null)
+                          setAttachmentError(null)
+                          setIsLoadingAttachment(false)
+                        }}
+                      >
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium truncate">
+                              {(() => {
+                                // 优先显示上传时的原始文件名
+                                if (contract.originalFilename) {
+                                  return contract.originalFilename
+                                }
+                                const ext = contract.filePath.split('.').pop() || 'pdf'
+                                const name = contract.title && contract.title !== '未识别'
+                                  ? contract.title
+                                  : contract.contractNumber
+                                return `${name}.${ext}`
+                              })()}
+                            </div>
+                            <div className="text-sm text-gray-500">合同主文件</div>
+                          </div>
+                        </div>
+                        {!selectedAttachment && <Badge variant="default">预览中</Badge>}
+                      </div>
+                    )}
+                    {/* 显示额外附件 */}
                     {attachments.map((att) => (
                       <div
                         key={att.id}
@@ -1470,7 +1504,6 @@ export function ContractDetail() {
                     ))}
                   </div>
                 </CardContent>
-              )}
             </Card>
           )}
 
