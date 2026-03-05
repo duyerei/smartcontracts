@@ -1109,7 +1109,9 @@ export function ContractDetail() {
                         <Upload className="h-4 w-4 mr-2" />
                         导入流程表单PDF
                       </Button>
-                    )}                  <CardContent>
+                    )}
+                  </CardHeader>
+                  <CardContent>
                     {(() => {
                       // 解析raw_data中的OA字段
                       let oaRaw: Record<string, any> = {}
