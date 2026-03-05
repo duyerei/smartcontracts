@@ -1525,6 +1525,9 @@ export function ContractDetail() {
                           </div>
                         </div>
                         {!selectedAttachment && <Badge variant="default">预览中</Badge>}
+                        {attachments.length === 0 || !attachments.some(a => a.is_primary) ? (
+                          <Badge variant="default" className="text-xs bg-primary">主附件</Badge>
+                        ) : null}
                       </div>
                     )}
                     {/* 显示额外附件 */}
@@ -1548,7 +1551,33 @@ export function ContractDetail() {
                             <div className="text-sm text-gray-500">{(att.file_size / 1024).toFixed(2)} KB</div>
                           </div>
                         </div>
-                        {selectedAttachment?.id === att.id && <Badge variant="default">预览中</Badge>}
+                        <div className="flex items-center gap-2">
+                          {selectedAttachment?.id === att.id && <Badge variant="default">预览中</Badge>}
+                          {att.is_primary ? (
+                            <Badge variant="default" className="text-xs bg-primary">主附件</Badge>
+                          ) : (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="text-xs border-primary text-primary hover:bg-primary hover:text-white"
+                              onClick={async (e) => {
+                                e.stopPropagation()
+                                try {
+                                  const token = localStorage.getItem('token')
+                                  const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}/set-primary`, {
+                                    method: 'PUT',
+                                    headers: { 'Authorization': `Bearer ${token}` }
+                                  })
+                                  if (response.ok) loadAttachments(id!)
+                                } catch (error) {
+                                  console.error('设置主附件失败:', error)
+                                }
+                              }}
+                            >
+                              ★ 设为主附件
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
