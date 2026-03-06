@@ -9,8 +9,7 @@ export function Layout() {
       <Sidebar />
       <div className="flex-1 flex flex-col overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-auto bg-muted/30 p-6 pr-[416px]">
-          {/* pr-[416px] = 400px(AI助手宽度) + 16px(padding) */}
+        <main className="flex-1 overflow-auto bg-muted/30 p-6">
           <Outlet />
         </main>
       </div>

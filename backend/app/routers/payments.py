@@ -442,8 +442,77 @@ async def upload_payment(
     db.add(payment)
     db.commit()
     db.refresh(payment)
+
+    # 后台解析PDF（仅PDF文件）
+    if file_path and file_path.lower().endswith('.pdf'):
+        background_tasks.add_task(_parse_payment_background, payment.id, file_path)
     
     return {"message": "文件上传成功", "payment_id": payment.id}
+
+
+def _parse_payment_background(payment_id: int, file_path: str):
+    """后台线程：解析付款PDF并更新记录"""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        payment = db.query(Payment).filter(Payment.id == payment_id).first()
+        if not payment:
+            return
+
+        result = payment_parser.parse_payment_pdf(file_path)
+        if not result.get("success"):
+            print(f"[付款解析] 解析失败: {result.get('error')}")
+            return
+
+        data = result["data"]
+        print(f"[付款解析] 解析结果: {data}")
+
+        # 更新字段
+        if data.get("payment_theme"):
+            payment.payment_theme = data["payment_theme"]
+            payment.description = data["payment_theme"]
+        if data.get("operator"):
+            payment.operator = data["operator"]
+        if data.get("department"):
+            payment.department = data["department"]
+        if data.get("application_number"):
+            payment.application_number = data["application_number"]
+        if data.get("contract_number"):
+            payment.contract_number = data["contract_number"]
+        if data.get("project_name"):
+            payment.project_name = data["project_name"]
+        if data.get("cost_center"):
+            payment.cost_center = data["cost_center"]
+        if data.get("payment_reason"):
+            payment.payment_reason = data["payment_reason"]
+        if data.get("amount"):
+            payment.amount = data["amount"]
+        if data.get("counterparty"):
+            payment.counterparty = data["counterparty"]
+        if data.get("payment_date"):
+            try:
+                payment.payment_date = datetime.strptime(data["payment_date"], "%Y-%m-%d")
+            except Exception:
+                pass
+
+        # 自动匹配合同（如果当前没有关联）
+        if not payment.contract_id and data.get("contract_number"):
+            contract = db.query(Contract).filter(
+                Contract.contract_number == data["contract_number"],
+                Contract.is_deleted == False
+            ).first()
+            if contract:
+                payment.contract_id = contract.id
+
+        payment.updated_at = datetime.now()
+        db.commit()
+        print(f"[付款解析] 付款记录 {payment_id} 解析完成")
+    except Exception as e:
+        print(f"[付款解析] 付款记录 {payment_id} 解析异常: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        db.close()
 
 
 @router.get("/{contract_id}/list")

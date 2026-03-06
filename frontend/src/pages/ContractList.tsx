@@ -389,9 +389,9 @@ export function ContractList() {
                         <TableCell>
                           {formatDate(contract.signedDate)}
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="whitespace-nowrap">
                           {contract.startDate && contract.endDate 
-                            ? `${formatDate(contract.startDate)} ~ ${formatDate(contract.endDate)}` 
+                            ? <div className="text-xs"><div>{formatDate(contract.startDate)}</div><div>{formatDate(contract.endDate)}</div></div>
                             : '-'}
                         </TableCell>
                         <TableCell>{getStatusBadge(contract.status, contract.endDate)}</TableCell>

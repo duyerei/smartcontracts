@@ -43,6 +43,8 @@ export function ContractDetail() {
   const navigate = useNavigate()
   const location = useLocation()
   const [contract, setContract] = useState<Contract | null>(null)
+  // 附件内容缓存：attachmentId -> {buffer, mimeType}，避免重复下载
+  const attachmentCache = useRef<Map<number, { buffer: ArrayBuffer; mimeType: string }>>(new Map())
   const [loading, setLoading] = useState(true)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isReparsing, setIsReparsing] = useState(false)
@@ -101,6 +103,8 @@ export function ContractDetail() {
   }
 
   useEffect(() => {
+    // 切换合同时清空附件缓存
+    attachmentCache.current.clear()
     const loadContract = async () => {
       if (!id) return
       setLoading(true)
@@ -111,7 +115,7 @@ export function ContractDetail() {
         
         // 只有非OA导入的合同才加载主文件预览
         if (c.source !== 'oa_import') {
-          loadPreviewUrl(id)
+          loadPreviewUrl(id, c.filePath)
         }
         
         // 加载附件列表（OA合同和普通合同都加载）
@@ -205,42 +209,38 @@ export function ContractDetail() {
   }, [selectedAttachment, contract?.id])
 
   // 加载预览URL
-  const loadPreviewUrl = async (contractId: string) => {
+  const loadPreviewUrl = async (contractId: string, filePath?: string) => {
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`/api/v1/contracts/${contractId}/download?mode=preview`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      })
       
-      if (response.ok) {
-        const blob = await response.blob()
-        const contentType = blob.type || response.headers.get('content-type') || ''
-        
-        if (contentType.includes('pdf')) {
-          setMainPreviewType('pdf')
-          const url = window.URL.createObjectURL(blob)
-          setPreviewUrl(url)
-        } else if (contentType.includes('image')) {
-          setMainPreviewType('image')
-          const url = window.URL.createObjectURL(blob)
-          setPreviewUrl(url)
-        } else if (contentType.includes('officedocument')) {
-          // .docx格式（openxmlformats），支持在线预览
-          setMainPreviewType('word')
+      // 根据文件扩展名判断类型，避免 HEAD 请求
+      const ext = filePath ? filePath.split('.').pop()?.toLowerCase() : ''
+      const isWord = ext === 'docx'
+      const isOldDoc = ext === 'doc'
+      const isImage = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'tif'].includes(ext || '')
+      
+      if (isOldDoc) {
+        setMainPreviewType('unknown')
+        return
+      }
+      
+      if (isWord) {
+        // .docx 需要下载 ArrayBuffer 给 docx-preview
+        setMainPreviewType('word')
+        const fullResponse = await fetch(`/api/v1/contracts/${contractId}/download?mode=preview`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        if (fullResponse.ok) {
+          const blob = await fullResponse.blob()
           const arrayBuffer = await blob.arrayBuffer()
           setMainWordBuffer(arrayBuffer)
-        } else if (contentType.includes('msword')) {
-          // .doc旧格式，不支持在线预览
-          setMainPreviewType('unknown')
-        } else {
-          // 兜底：尝试当PDF处理
-          setMainPreviewType('pdf')
-          const url = window.URL.createObjectURL(blob)
-          setPreviewUrl(url)
         }
+        return
       }
+      
+      // PDF、图片或未知类型：直接用带 token 的 URL，浏览器流式加载 + 利用缓存
+      setMainPreviewType(isImage ? 'image' : 'pdf')
+      setPreviewUrl(`/api/v1/contracts/${contractId}/download?mode=preview&token=${token}`)
     } catch (error) {
       console.error('加载预览失败:', error)
     }
@@ -249,10 +249,10 @@ export function ContractDetail() {
   // 清理blob URL
   useEffect(() => {
     return () => {
-      if (previewUrl) {
+      if (previewUrl && previewUrl.startsWith('blob:')) {
         window.URL.revokeObjectURL(previewUrl)
       }
-      if (attachmentPreviewUrl) {
+      if (attachmentPreviewUrl && attachmentPreviewUrl.startsWith('blob:')) {
         window.URL.revokeObjectURL(attachmentPreviewUrl)
       }
     }
@@ -650,99 +650,73 @@ export function ContractDetail() {
     setWordArrayBuffer(null)
     
     try {
-      // 清理之前的预览URL
-      if (attachmentPreviewUrl) {
+      // 清理之前的预览URL（blob URL 才需要 revoke，直接 URL 不需要）
+      if (attachmentPreviewUrl && attachmentPreviewUrl.startsWith('blob:')) {
         window.URL.revokeObjectURL(attachmentPreviewUrl)
         setAttachmentPreviewUrl('')
       }
       
-      // 通过后端API获取附件
       const token = localStorage.getItem('token')
-      const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/download`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      })
       
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.detail || `获取附件失败 (HTTP ${response.status})`)
-      }
-      
-      const blob = await response.blob()
-      
-      // 验证blob是否为有效的文件内容
-      console.log(`附件信息 - 名称: ${attachment.file_name}, 大小: ${blob.size} bytes, 类型: ${blob.type}`)
-      
-      // 检查是否为错误响应（如HTML错误页面）
-      if (blob.type === 'text/html' || blob.type === 'application/json') {
-        const text = await blob.text()
-        console.error('响应内容:', text)
-        throw new Error('服务器返回错误响应，请检查附件是否存在')
-      }
-      
-      // 对于.docx文档，验证是否为有效的ZIP文件
-      if (ext === 'docx') {
-        const arrayBuffer = await blob.arrayBuffer()
-        const view = new Uint8Array(arrayBuffer)
-        const header = view.slice(0, 4)
-        const headerHex = Array.from(header).map(b => b.toString(16).padStart(2, '0')).join('')
-        console.log(`Word文件头: ${headerHex}`)
-        
-        const isValidDocx = header[0] === 0x50 && header[1] === 0x4B  // PK (ZIP)
-        if (!isValidDocx) {
-          console.error('无效的.docx文件格式')
-          throw new Error(`无效的Word文件格式 (文件头: ${headerHex})，可能是旧版.doc格式`)
-        }
-      }
-      
-      // 根据文件类型设置预览类型
-      if (ext === 'docx') {
-        // .docx文档：读取为ArrayBuffer，通过renderAsync渲染
-        setAttachmentPreviewType('word')
-        const reader = new FileReader()
-        reader.onload = (e) => {
-          const arrayBuffer = e.target?.result as ArrayBuffer
-          console.log(`Word文件已读取，大小: ${arrayBuffer.byteLength} bytes`)
-          setWordArrayBuffer(arrayBuffer)
-          setIsLoadingAttachment(false)
-        }
-        reader.onerror = () => {
-          setAttachmentError('读取Word文件失败')
-          setIsLoadingAttachment(false)
-        }
-        reader.readAsArrayBuffer(blob)
-      } else if (ext === 'doc') {
-        // .doc 文件：通过后端转 PDF 后预览
-        try {
-          const pdfResponse = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/preview-pdf`, {
+      if (ext === 'pdf' || ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext || '')) {
+        // PDF 和图片直接用带 token 的 URL，浏览器流式加载 + 利用缓存
+        const directUrl = `/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/download?token=${token}`
+        setAttachmentPreviewUrl(directUrl)
+        setAttachmentPreviewType(ext === 'pdf' ? 'pdf' : 'image')
+        setIsLoadingAttachment(false)
+      } else if (ext === 'docx' || ext === 'doc') {
+        // Word 文件需要下载 ArrayBuffer，优先从缓存读取
+        let arrayBuffer: ArrayBuffer
+        let mimeType: string
+        const cached = attachmentCache.current.get(attachment.id)
+        if (cached) {
+          arrayBuffer = cached.buffer
+          mimeType = cached.mimeType
+        } else {
+          const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/download`, {
             headers: { 'Authorization': `Bearer ${token}` }
           })
-          if (!pdfResponse.ok) {
-            const errData = await pdfResponse.json().catch(() => ({}))
-            throw new Error(errData.detail || '.doc 转 PDF 失败')
+          
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}))
+            throw new Error(errorData.detail || `获取附件失败 (HTTP ${response.status})`)
           }
-          const pdfBlob = await pdfResponse.blob()
-          const url = window.URL.createObjectURL(pdfBlob)
-          setAttachmentPreviewUrl(url)
-          setAttachmentPreviewType('pdf')
-          setIsLoadingAttachment(false)
-        } catch (docErr) {
-          setAttachmentPreviewType('unknown')
-          setAttachmentError(`.doc 转 PDF 预览失败: ${(docErr as Error).message}，请下载后查看`)
-          setIsLoadingAttachment(false)
+          
+          const blob = await response.blob()
+          mimeType = blob.type || 'application/octet-stream'
+          arrayBuffer = await blob.arrayBuffer()
+          attachmentCache.current.set(attachment.id, { buffer: arrayBuffer, mimeType })
         }
-      } else if (ext === 'pdf') {
-        // PDF和图片：使用Blob URL
-        const url = window.URL.createObjectURL(blob)
-        setAttachmentPreviewUrl(url)
-        setAttachmentPreviewType('pdf')
-        setIsLoadingAttachment(false)
-      } else if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext || '')) {
-        const url = window.URL.createObjectURL(blob)
-        setAttachmentPreviewUrl(url)
-        setAttachmentPreviewType('image')
-        setIsLoadingAttachment(false)
+        
+        if (ext === 'docx') {
+          const view = new Uint8Array(arrayBuffer, 0, 4)
+          if (!(view[0] === 0x50 && view[1] === 0x4B)) {
+            throw new Error('无效的Word文件格式，可能是旧版.doc格式')
+          }
+          setAttachmentPreviewType('word')
+          setWordArrayBuffer(arrayBuffer)
+          setIsLoadingAttachment(false)
+        } else {
+          // .doc 旧格式转 PDF
+          try {
+            const pdfResponse = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/preview-pdf`, {
+              headers: { 'Authorization': `Bearer ${token}` }
+            })
+            if (!pdfResponse.ok) {
+              const errData = await pdfResponse.json().catch(() => ({}))
+              throw new Error(errData.detail || '.doc 转 PDF 失败')
+            }
+            const pdfBlob = await pdfResponse.blob()
+            const url = window.URL.createObjectURL(pdfBlob)
+            setAttachmentPreviewUrl(url)
+            setAttachmentPreviewType('pdf')
+            setIsLoadingAttachment(false)
+          } catch (docErr) {
+            setAttachmentPreviewType('unknown')
+            setAttachmentError(`.doc 转 PDF 预览失败: ${(docErr as Error).message}，请下载后查看`)
+            setIsLoadingAttachment(false)
+          }
+        }
       } else {
         setAttachmentPreviewType('unknown')
         setAttachmentError('不支持的文件格式，请下载后查看')
@@ -1096,9 +1070,8 @@ export function ContractDetail() {
                 </CardContent>
               </Card>
 
-              {/* OA流程信息（仅OA导入合同显示） */}
-              {contract.source === 'oa_import' && (
-                <Card>
+              {/* OA流程信息（所有合同都显示） */}
+              <Card>
                   <CardHeader className="flex flex-row items-center justify-between">
                     <div>
                       <CardTitle>OA流程信息</CardTitle>
@@ -1120,12 +1093,10 @@ export function ContractDetail() {
                             : (contract as any).rawData
                         } catch {}
                       }
-                      // 判断是否有OA流程数据（rawData非空且有实际字段）
-                      const hasOaData = Object.keys(oaRaw).length > 0 && (
-                        oaRaw['doc_subject'] || contract.applicant || contract.department || 
-                        contract.company || contract.counterparty || contract.amount ||
-                        oaRaw['doc_status'] || oaRaw['node_name']
-                      )
+                      // 判断是否有OA流程数据：rawData有内容，或合同本身有OA字段
+                      const hasOaData = Object.keys(oaRaw).length > 0 || 
+                        contract.applicant || contract.company || 
+                        contract.counterparty || contract.department
                       if (!hasOaData) {
                         return (
                           <p className="text-muted-foreground text-sm">尚未导入流程表单PDF，请点击上方按钮导入</p>
@@ -1136,135 +1107,37 @@ export function ContractDetail() {
                           {/* 流程基本信息 */}
                           <div className="mb-6">
                             <h4 className="text-sm font-semibold mb-3">流程基本信息</h4>
-                            <div className="grid grid-cols-2 gap-6">
-                              {oaRaw['doc_subject'] && (
-                                <div className="flex items-start gap-3 col-span-2">
-                                  <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">OA主题</p>
-                                    <p className="font-medium">{oaRaw['doc_subject']}</p>
-                                  </div>
+                            <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+                              {(oaRaw['doc_subject'] || oaRaw['doc_number']) && (
+                                <div className="col-span-2">
+                                  <p className="text-xs text-muted-foreground mb-0.5">OA主题</p>
+                                  <p className="font-medium text-sm">{oaRaw['doc_subject'] || oaRaw['doc_number']}</p>
                                 </div>
                               )}
-                              {contract.applicant && (
-                                <div className="flex items-start gap-3">
-                                  <User className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">申请人</p>
-                                    <p className="font-medium">{contract.applicant}</p>
-                                  </div>
+                              {[
+                                { label: '申请人', value: oaRaw['applicant'] || oaRaw['申请人'] || oaRaw['申请人姓名'] || contract.applicant },
+                                { label: '申请单号', value: oaRaw['doc_number'] || oaRaw['申请单编号'] || oaRaw['申请单号'] },
+                                { label: '合同名称', value: oaRaw['doc_subject'] || oaRaw['合同名称'] || oaRaw['主题'] },
+                                { label: '合同性质', value: oaRaw['contract_nature'] || oaRaw['合同性质'] || oaRaw['合同类型'] },
+                                { label: '归属成本中心', value: oaRaw['cost_center'] || oaRaw['归属成本中心'] || oaRaw['成本中心'] },
+                                { label: '申请人岗位', value: oaRaw['申请人岗位'] || contract.position },
+                                { label: '发起部门', value: oaRaw['department'] || oaRaw['申请部门'] || oaRaw['发起部门'] || contract.department },
+                                { label: '部门经办人', value: oaRaw['handler'] || oaRaw['合同执行申请部门经办人'] || oaRaw['部门经办人'] || oaRaw['经办人'] },
+                                { label: '我方公司', value: oaRaw['company'] || oaRaw['甲方'] || contract.company },
+                                { label: '对方单位', value: oaRaw['counterparty'] || oaRaw['乙方'] || contract.counterparty },
+                                { label: '对方联系人', value: oaRaw['counterparty_contact'] || contract.counterpartyContact },
+                                { label: '对方地址', value: oaRaw['counterparty_address'] || contract.counterpartyAddress },
+                                { label: '合同金额', value: contract.amount ? formatAmount(contract.amount, contract.currency) : (oaRaw['amount'] ? `¥${oaRaw['amount']}` : null) },
+                                { label: '合同份数', value: oaRaw['copies'] || oaRaw['合同份数'] || contract.copies },
+                                { label: '签订时间', value: contract.signedDate ? formatDate(contract.signedDate) : null },
+                                { label: '有效期', value: contract.startDate && contract.endDate ? `${formatDate(contract.startDate)} ~ ${formatDate(contract.endDate)}` : null },
+                                { label: '是否制式合同', value: oaRaw['是否为已审批定稿制式业务合同'] },
+                              ].filter(item => item.value).map(item => (
+                                <div key={item.label}>
+                                  <p className="text-xs text-muted-foreground mb-0.5">{item.label}</p>
+                                  <p className="font-medium text-sm">{item.value}</p>
                                 </div>
-                              )}
-                              {(oaRaw['申请人岗位'] || contract.position) && (
-                                <div className="flex items-start gap-3">
-                                  <User className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">申请人岗位</p>
-                                    <p className="font-medium">{oaRaw['申请人岗位'] || contract.position}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.department && (
-                                <div className="flex items-start gap-3">
-                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">发起部门</p>
-                                    <p className="font-medium">{contract.department}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.company && (
-                                <div className="flex items-start gap-3">
-                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">我方公司</p>
-                                    <p className="font-medium">{contract.company}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.counterparty && (
-                                <div className="flex items-start gap-3">
-                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">对方单位</p>
-                                    <p className="font-medium">{contract.counterparty}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.counterpartyContact && (
-                                <div className="flex items-start gap-3">
-                                  <User className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">对方联系人</p>
-                                    <p className="font-medium">{contract.counterpartyContact}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.counterpartyAddress && (
-                                <div className="flex items-start gap-3">
-                                  <Building className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">对方地址</p>
-                                    <p className="font-medium">{contract.counterpartyAddress}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.amount && (
-                                <div className="flex items-start gap-3">
-                                  <DollarSign className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">合同金额</p>
-                                    <p className="font-medium">{formatAmount(contract.amount, contract.currency)}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.paymentType && (
-                                <div className="flex items-start gap-3">
-                                  <DollarSign className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">付款方式</p>
-                                    <p className="font-medium">{contract.paymentType}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.copies && (
-                                <div className="flex items-start gap-3">
-                                  <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">合同份数</p>
-                                    <p className="font-medium">{contract.copies}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {oaRaw['是否为已审批定稿制式业务合同'] && (
-                                <div className="flex items-start gap-3">
-                                  <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">是否制式合同</p>
-                                    <p className="font-medium">{oaRaw['是否为已审批定稿制式业务合同']}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.signedDate && (
-                                <div className="flex items-start gap-3">
-                                  <Calendar className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">签订时间</p>
-                                    <p className="font-medium">{formatDate(contract.signedDate)}</p>
-                                  </div>
-                                </div>
-                              )}
-                              {contract.startDate && contract.endDate && (
-                                <div className="flex items-start gap-3">
-                                  <Calendar className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                  <div>
-                                    <p className="text-sm text-muted-foreground">有效期</p>
-                                    <p className="font-medium">
-                                      {formatDate(contract.startDate)} ~ {formatDate(contract.endDate)}
-                                    </p>
-                                  </div>
-                                </div>
-                              )}
+                              ))}
                             </div>
                           </div>
 
@@ -1272,52 +1145,19 @@ export function ContractDetail() {
                           {(oaRaw['doc_status'] || oaRaw['node_name'] || oaRaw['当前处理人'] || oaRaw['已经处理人']) && (
                             <div className="mb-6 pt-4 border-t">
                               <h4 className="text-sm font-semibold mb-3">审批流程信息</h4>
-                              <div className="grid grid-cols-2 gap-6">
-                                {oaRaw['doc_status'] && (
-                                  <div className="flex items-start gap-3">
-                                    <AlertTriangle className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                    <div>
-                                      <p className="text-sm text-muted-foreground">OA文档状态</p>
-                                      <p className="font-medium">{oaRaw['doc_status']}</p>
-                                    </div>
+                              <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+                                {[
+                                  { label: 'OA文档状态', value: oaRaw['doc_status'] },
+                                  { label: '当前审批节点', value: oaRaw['node_name'] },
+                                  { label: '当前处理人', value: oaRaw['当前处理人'] || (oaRaw['handler_name'] !== '<无>' ? oaRaw['handler_name'] : null) },
+                                  { label: '已处理人', value: oaRaw['已经处理人'] },
+                                  { label: 'OA流程模板', value: oaRaw['模板名称'] },
+                                ].filter(item => item.value).map(item => (
+                                  <div key={item.label}>
+                                    <p className="text-xs text-muted-foreground mb-0.5">{item.label}</p>
+                                    <p className="font-medium text-sm">{item.value}</p>
                                   </div>
-                                )}
-                                {oaRaw['node_name'] && (
-                                  <div className="flex items-start gap-3">
-                                    <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                    <div>
-                                      <p className="text-sm text-muted-foreground">当前审批节点</p>
-                                      <p className="font-medium">{oaRaw['node_name']}</p>
-                                    </div>
-                                  </div>
-                                )}
-                                {oaRaw['handler_name'] && oaRaw['handler_name'] !== '<无>' && (
-                                  <div className="flex items-start gap-3">
-                                    <User className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                    <div>
-                                      <p className="text-sm text-muted-foreground">当前处理人</p>
-                                      <p className="font-medium">{oaRaw['当前处理人'] || oaRaw['handler_name']}</p>
-                                    </div>
-                                  </div>
-                                )}
-                                {oaRaw['已经处理人'] && (
-                                  <div className="flex items-start gap-3">
-                                    <User className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                    <div>
-                                      <p className="text-sm text-muted-foreground">已处理人</p>
-                                      <p className="font-medium">{oaRaw['已经处理人']}</p>
-                                    </div>
-                                  </div>
-                                )}
-                                {oaRaw['模板名称'] && (
-                                  <div className="flex items-start gap-3 col-span-2">
-                                    <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
-                                    <div>
-                                      <p className="text-sm text-muted-foreground">OA流程模板</p>
-                                      <p className="font-medium">{oaRaw['模板名称']}</p>
-                                    </div>
-                                  </div>
-                                )}
+                                ))}
                               </div>
                             </div>
                           )}
@@ -1339,6 +1179,17 @@ export function ContractDetail() {
                       }
                       if (oaRawForSummary['合同摘要']) {
                         oaSummary = oaRawForSummary['合同摘要']
+                      }
+                      // 优先级1.5：从rawData['summary']读取（LLM提取的摘要）
+                      if (!oaSummary && oaRawForSummary['summary']) {
+                        const s = oaRawForSummary['summary']
+                        if (s.length < 300 && !s.startsWith('[已读取') && !s.includes('--- 第1页 ---')) {
+                          oaSummary = s
+                        }
+                      }
+                      // 优先级1.6：从rawData['合作内容/签约背景']读取
+                      if (!oaSummary && oaRawForSummary['合作内容/签约背景']) {
+                        oaSummary = oaRawForSummary['合作内容/签约背景']
                       }
                       // 优先级2：从extracted_data.oa_original_summary
                       if (!oaSummary && contract.extractedData) {
@@ -1365,7 +1216,6 @@ export function ContractDetail() {
                     })()}
                   </CardContent>
                 </Card>
-              )}
 
               {/* 补充协议列表 */}
               {id && <SupplementList contractId={parseInt(id)} />}
@@ -1997,18 +1847,18 @@ export function ContractDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* 付款流程表单PDF导入弹窗 */}
+      {/* OA流程表单PDF导入弹窗 */}
       {showPaymentPdfImport && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">导入付款流程表单PDF</h2>
+              <h2 className="text-lg font-semibold">导入OA流程表单PDF</h2>
               <button onClick={() => { setShowPaymentPdfImport(false); setPaymentPdfFile(null); setPaymentPdfResult(null) }} className="text-gray-400 hover:text-gray-600">
                 <X className="h-5 w-5" />
               </button>
             </div>
             <p className="text-sm text-muted-foreground">
-              将OA系统中的付款申请表单导出为PDF，上传后系统将自动解析并创建付款记录，并自动关联到当前合同。
+              将OA系统中的合同审批流程表单导出为PDF，上传后系统将自动解析并更新合同的OA流程信息。
             </p>
             {!paymentPdfResult ? (
               <>
@@ -2034,20 +1884,25 @@ export function ContractDetail() {
                 <div className="flex gap-2 justify-end">
                   <Button variant="outline" onClick={() => { setShowPaymentPdfImport(false); setPaymentPdfFile(null) }}>取消</Button>
                   <Button onClick={async () => {
-                    if (!paymentPdfFile) return
+                    if (!paymentPdfFile || !id) return
                     setImportingPaymentPdf(true)
                     try {
-                      const result = await paymentManagementApi.importPdf(paymentPdfFile)
-                      if (result.error) {
-                        setPaymentPdfResult({ success: false, message: result.error })
+                      const formData = new FormData()
+                      formData.append('file', paymentPdfFile)
+                      const token = localStorage.getItem('token')
+                      const response = await fetch(`/api/v1/contracts/${id}/import-oa-flow-pdf`, {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${token}` },
+                        body: formData,
+                      })
+                      const data = await response.json()
+                      if (!response.ok) {
+                        setPaymentPdfResult({ success: false, message: data.detail || '导入失败' })
                       } else {
-                        // 如果解析出的合同编号与当前合同不匹配，手动关联
-                        const paymentId = result.data?.payment_id
-                        if (paymentId && !result.data?.auto_linked && id) {
-                          await paymentManagementApi.linkContract(paymentId, Number(id))
-                        }
-                        setPaymentPdfResult({ success: true, message: '导入成功', detail: '付款记录已创建并关联到当前合同' })
-                        fetchContractPayments()
+                        setPaymentPdfResult({ success: true, message: '导入成功', detail: 'OA流程信息已更新，请刷新页面查看' })
+                        // 重新加载合同数据
+                        const result = await contractApi.get(id)
+                        if (result.data) setContract(result.data as unknown as Contract)
                       }
                     } catch (e: any) {
                       setPaymentPdfResult({ success: false, message: e.message || '导入失败' })

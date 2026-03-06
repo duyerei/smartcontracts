@@ -10,7 +10,18 @@ from dateutil.relativedelta import relativedelta
 from app.database import get_db, Contract, init_db, User, ContractAttachment, Supplement
 from app.schemas import ContractResponse, ContractListResponse, ContractUpdate, UploadResponse, ExtractData
 from app.services import file_storage, contract_parser, llm_service
-from app.auth import get_current_user
+from app.auth import get_current_user, verify_token
+
+def get_current_user_optional(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """可选认证：有 Authorization header 时验证，没有时返回 None（允许 query token 兜底）"""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:]
+        return verify_token(token, db)
+    return None
 
 router = APIRouter(prefix="/contracts", tags=["合同管理"])
 
@@ -855,10 +866,16 @@ async def upload_contract_attachment(
 def download_contract(
     contract_id: int,
     mode: str = Query("download"),
-    current_user: User = Depends(get_current_user),
+    token: Optional[str] = Query(None),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
-    """下载或预览合同文件。mode=preview 时内嵌显示，mode=download 时下载"""
+    """下载或预览合同文件。mode=preview 时内嵌显示，mode=download 时下载。支持 token query 参数（用于 iframe 直接加载）"""
+    # 支持 query token（用于 iframe 直接加载，无法设置 Authorization header）
+    if current_user is None and token:
+        current_user = verify_token(token, db)
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="未授权")
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
@@ -890,13 +907,17 @@ def download_contract(
     media_type = mime_map.get(ext, mimetypes.guess_type(str(full_path))[0] or "application/octet-stream")
     
     if mode == "preview":
-        from starlette.responses import Response
-        with open(str(full_path), "rb") as f:
-            content = f.read()
-        return Response(
-            content=content,
+        from starlette.responses import FileResponse as StarletteFileResponse
+        import os
+        file_size = os.path.getsize(str(full_path))
+        return StarletteFileResponse(
+            path=str(full_path),
             media_type=media_type,
-            headers={"Content-Disposition": "inline"}
+            headers={
+                "Content-Disposition": "inline",
+                "Cache-Control": "private, max-age=3600",
+                "ETag": f'"{contract_id}-{int(full_path.stat().st_mtime)}"',
+            }
         )
     
     # 下载时用原始文件扩展名
@@ -1899,3 +1920,200 @@ def _generate_contract_summary_with_llm(extracted: dict, raw_text: str, llm_resu
         return _generate_contract_summary(extracted, raw_text)
 
 
+
+@router.post("/{contract_id}/import-oa-flow-pdf")
+async def import_oa_flow_pdf(
+    contract_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """上传OA流程表单PDF，解析后更新合同的OA流程信息字段"""
+    import tempfile
+    from app.services.payment_parser import PaymentParser
+
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="请上传PDF文件")
+
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+
+    content = await file.read()
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+            tmp_path = tmp.name
+            tmp.write(content)
+
+        # 用OCR提取PDF文本
+        from app.services.contract_parser import ContractParser
+        parser = ContractParser()
+        raw_text = parser.ocr.extract_text_from_file(tmp_path)
+
+        if not raw_text or len(raw_text.strip()) < 10:
+            raise HTTPException(status_code=422, detail="无法从PDF中提取文字，请确认PDF非扫描件或图片格式")
+
+        # 用正则从OA流程表单文本中提取关键字段
+        # OA表单格式：字段名单独一行，值在下一行（换行格式）
+        oa_fields = {}
+        import re as _re
+        import json as _json
+
+        def extract_field(text, *labels):
+            """从换行格式或冒号格式提取字段值"""
+            for label in labels:
+                # 换行格式：字段名\n值
+                m = _re.search('(?:^|\n)' + _re.escape(label) + r'\s*\n\s*([^\n\r]{1,100})', text)
+                if m:
+                    val = m.group(1).strip()
+                    if val and val.lower() not in ('null', 'none', ''):
+                        return val
+                # 冒号格式：字段名：值
+                m = _re.search(_re.escape(label) + r'[：:]\s*([^\n\r]{1,100})', text)
+                if m:
+                    val = m.group(1).strip()
+                    if val and val.lower() not in ('null', 'none', ''):
+                        return val
+            return None
+
+        # 提取7个核心字段 + 其他字段
+        oa_fields['applicant']    = extract_field(raw_text, '申请人', '申请人姓名', '发起人', '经办人')
+        oa_fields['doc_number']   = extract_field(raw_text, '申请单编号', '申请单号', '流程编号', '单据编号', '申请编号')
+        oa_fields['cost_center']  = extract_field(raw_text, '归属成本中心', '成本中心', '费用归属')
+        oa_fields['doc_subject']  = extract_field(raw_text, '主题', '合同名称', '流程主题', '事由', '合同主题')
+        oa_fields['handler']      = extract_field(raw_text, '合同执行申请部门经办人', '部门经办人', '经办人', '联系人')
+        oa_fields['contract_nature'] = extract_field(raw_text, '合同性质', '合同类型', '合同类别')
+        oa_fields['department']   = extract_field(raw_text, '申请部门', '部门', '发起部门', '所属部门', '申请人部门')
+        oa_fields['company']      = extract_field(raw_text, '我方公司', '甲方单位', '甲方公司', '甲方')
+        oa_fields['counterparty'] = extract_field(raw_text, '对方单位', '乙方单位', '乙方公司', '乙方', '供应商', '服务商')
+        oa_fields['counterparty_contact'] = extract_field(raw_text, '对方联系人', '乙方联系人', '联系方式')
+        oa_fields['payment_type'] = extract_field(raw_text, '付款方式', '支付方式', '结算方式')
+        oa_fields['copies']       = extract_field(raw_text, '合同份数', '份数', '合同正本份数')
+        oa_fields['doc_status']   = extract_field(raw_text, '流程状态', '审批状态', '状态')
+        # 去掉空值
+        oa_fields = {k: v for k, v in oa_fields.items() if v}
+
+        # 金额提取（支持多种格式）
+        amount_match = _re.search(r'(?:合同金额|总金额|金额)[：:]\s*[¥￥]?\s*([\d,，.]+)', raw_text)
+        if not amount_match:
+            amount_match = _re.search(r'(?:合同金额|总金额|金额)\s*\n\s*[¥￥]?\s*([\d,，.]+)', raw_text)
+        if amount_match:
+            oa_fields['amount'] = amount_match.group(1).replace(',', '').replace('，', '')
+
+        # 尝试用LLM补充解析（可选，失败不影响）
+        llm_result_str = ''
+        try:
+            prompt_text = f"""从以下OA流程表单文本提取信息，JSON格式返回，字段：
+- doc_subject: 合同主题/流程主题/主题
+- applicant: 申请人姓名
+- doc_number: 申请单编号/申请单号
+- cost_center: 归属成本中心
+- handler: 合同执行申请部门经办人
+- contract_nature: 合同性质
+- department: 申请部门
+- company: 我方公司（甲方）
+- counterparty: 对方单位（乙方）
+- counterparty_contact: 对方联系人
+- payment_type: 付款方式
+- copies: 合同份数
+- amount: 合同金额（纯数字）
+- summary: 合同事由摘要（不超过150字，用自然语言描述合同目的）
+只返回JSON，不要其他内容。\n\n{raw_text[:3000]}"""
+            llm_result_str = llm_service.llm_service.call_llm(prompt_text, raw_text[:3000])
+            if llm_result_str:
+                json_match = _re.search(r'\{.*\}', llm_result_str, _re.DOTALL)
+                if json_match:
+                    llm_fields = _json.loads(json_match.group())
+                    # LLM结果覆盖/补充字段（LLM优先级更高）
+                    for k, v in llm_fields.items():
+                        if v and str(v).lower() not in ('null', 'none', ''):
+                            oa_fields[k] = str(v)
+        except Exception as e:
+            print(f"LLM辅助解析失败（已用正则兜底）: {e}")
+
+        # 同时从 raw_data 已有的中文字段中补充（兼容旧数据）
+        existing_raw_check = {}
+        if contract.raw_data:
+            try:
+                existing_raw_check = json.loads(contract.raw_data)
+            except Exception:
+                pass
+        cn_field_map = {
+            '甲方': 'company', '乙方': 'counterparty',
+            '申请人': 'applicant', '申请人姓名': 'applicant',
+            '申请部门': 'department', '发起部门': 'department',
+        }
+        for cn_key, oa_key in cn_field_map.items():
+            if cn_key in existing_raw_check and oa_key not in oa_fields:
+                oa_fields[oa_key] = existing_raw_check[cn_key]
+
+        # 更新合同字段（强制覆盖，以导入的PDF为准）
+        updated_fields = []
+        field_map = {
+            'applicant': 'applicant',
+            'department': 'department',
+            'company': 'company',
+            'counterparty': 'counterparty',
+            'counterparty_contact': 'counterparty_contact',
+            'payment_type': 'payment_type',
+            'copies': 'copies',
+        }
+        for oa_key, db_field in field_map.items():
+            val = oa_fields.get(oa_key)
+            if val and str(val).lower() not in ('null', 'none', ''):
+                setattr(contract, db_field, str(val))
+                updated_fields.append(db_field)
+
+        # amount 单独处理
+        if oa_fields.get('amount'):
+            try:
+                amt_str = str(oa_fields['amount']).replace(',', '').replace('，', '')
+                nums = _re.findall(r'\d+\.?\d*', amt_str)
+                if nums:
+                    contract.amount = float(nums[0])
+                    updated_fields.append('amount')
+            except Exception:
+                pass
+
+        # 将解析结果存入 raw_data（合并已有数据）
+        existing_raw = {}
+        if contract.raw_data:
+            try:
+                existing_raw = json.loads(contract.raw_data)
+            except Exception:
+                pass
+        # 清除旧的 summary 原文垃圾数据
+        existing_raw.pop('summary', None)
+        existing_raw.update({k: v for k, v in oa_fields.items() if v and k != 'summary' and str(v).lower() not in ('null', 'none')})
+        existing_raw['doc_subject'] = oa_fields.get('doc_subject') or existing_raw.get('doc_subject', '')
+        # 只在LLM成功提取了有意义的摘要时才写入（避免把PDF原文存进去）
+        llm_summary = oa_fields.get('summary', '')
+        if llm_summary and len(llm_summary) < 300 and not llm_summary.startswith('合同编号') and not llm_summary.startswith('流程'):
+            existing_raw['合同摘要'] = llm_summary
+        contract.raw_data = json.dumps(existing_raw, ensure_ascii=False)
+
+        # 标记为OA导入来源（仅当合同没有自己的文件时才改source，避免覆盖手动上传合同的source）
+        if not contract.file_path and contract.source != 'oa_import':
+            contract.source = 'oa_import'
+
+        contract.updated_at = datetime.now()
+        db.commit()
+
+        return {
+            "message": "OA流程信息导入成功",
+            "updated_fields": updated_fields,
+            "oa_fields": oa_fields,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+    finally:
+        if tmp_path:
+            import os
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass

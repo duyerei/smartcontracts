@@ -1,7 +1,7 @@
 """
 OA合同导入路由
 """
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -11,9 +11,20 @@ import codecs
 import re
 
 from app.database import get_db, Contract, ContractAttachment, User, SessionLocal
-from app.auth import get_current_user
+from app.auth import get_current_user, verify_token
 
 router = APIRouter(prefix="/contracts", tags=["合同导入"])
+
+
+def get_current_user_optional(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:]
+        return verify_token(token, db)
+    return None
 
 
 class AttachmentData(BaseModel):
@@ -465,12 +476,19 @@ async def get_contract_attachments(
 async def download_attachment(
     contract_id: int,
     attachment_id: int,
-    current_user: User = Depends(get_current_user),
+    token: Optional[str] = Query(None),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
-    """下载或预览合同附件"""
+    """下载或预览合同附件。支持 token query 参数（用于 iframe 直接加载）"""
     from starlette.responses import Response, RedirectResponse
     from app.services import file_storage
+    
+    # 支持 query token
+    if current_user is None and token:
+        current_user = verify_token(token, db)
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="未授权")
     
     # 验证合同是否存在
     contract = db.query(Contract).filter(
@@ -515,20 +533,19 @@ async def download_attachment(
             }
             media_type = media_type_map.get(file_ext, 'application/octet-stream')
             
-            with open(str(full_path), "rb") as f:
-                content = f.read()
-            
             # 使用URL编码的文件名以支持中文
             from urllib.parse import quote
-            # quote() 需要字符串，不是字节
             encoded_filename = quote(attachment.file_name)
+            import os
             
-            return Response(
-                content=content,
+            from starlette.responses import FileResponse as StarletteFileResponse
+            return StarletteFileResponse(
+                path=str(full_path),
                 media_type=media_type,
                 headers={
                     "Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}",
-                    "Content-Length": str(len(content))
+                    "Cache-Control": "private, max-age=3600",
+                    "ETag": f'"{attachment_id}-{int(full_path.stat().st_mtime)}"',
                 }
             )
         except Exception as e:

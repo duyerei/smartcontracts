@@ -34,17 +34,32 @@ class PaymentParser:
         }
 
     def _extract_text(self, file_path: str) -> str:
-        """用PyMuPDF提取PDF文本"""
+        """提取PDF文本：先用PyMuPDF，失败或文字太少则用百度OCR"""
+        # 先尝试PyMuPDF（速度快，适合文字型PDF）
+        text = ''
         try:
             import fitz
             doc = fitz.open(file_path)
-            all_text = []
+            pages_text = []
             for page in doc:
-                all_text.append(page.get_text())
+                pages_text.append(page.get_text())
             doc.close()
-            return "\n".join(all_text)
+            text = "\n".join(pages_text)
         except Exception as e:
-            return ""
+            print(f"[PaymentParser] PyMuPDF提取失败: {e}")
+
+        # 如果提取到的文字太少（扫描件/图片型PDF），改用百度OCR
+        if not text or len(text.strip()) < 50:
+            print(f"[PaymentParser] PyMuPDF文字不足({len(text.strip())}字)，改用百度OCR")
+            try:
+                from app.services.baidu_ocr import BaiduOCR
+                ocr = BaiduOCR()
+                text = ocr.recognize_pdf(file_path)
+                print(f"[PaymentParser] 百度OCR提取完成，长度: {len(text)}")
+            except Exception as e:
+                print(f"[PaymentParser] 百度OCR提取失败: {e}")
+
+        return text
 
     def _extract_theme(self, text: str) -> str:
         """提取付款主题（通常是PDF标题/第一行有意义的文字）"""

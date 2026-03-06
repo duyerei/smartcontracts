@@ -140,8 +140,6 @@ export function AgentChatWidget() {
       {/* 收起状态 - 右侧悬浮按钮 */}
       {!open && (
         <div className="fixed right-0 top-1/2 -translate-y-1/2 z-50">
-          {/* 右侧留白区域提示（半透明） */}
-          <div className="fixed right-0 top-0 w-[400px] h-screen bg-blue-50/30 pointer-events-none border-l border-blue-100/50" />
           
           <button
             onClick={() => setOpen(true)}
