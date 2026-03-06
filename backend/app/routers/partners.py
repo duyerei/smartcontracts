@@ -89,9 +89,32 @@ def deduplicate_partners(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """手动触发合作伙伴去重"""
-    merged = _deduplicate_existing_partners(db)
-    return {"message": f"去重完成，合并了 {merged} 个重复记录"}
+    """手动触发合作伙伴去重（直接SQL + Python双重去重）"""
+    # 方法1：直接SQL删除完全相同名称的重复记录（保留最小id）
+    sql_deleted = 0
+    try:
+        result = db.execute(
+            """
+            UPDATE partners SET is_deleted = 1
+            WHERE is_deleted = 0
+              AND id NOT IN (
+                SELECT MIN(id) FROM partners
+                WHERE is_deleted = 0
+                GROUP BY name
+              )
+            """
+        )
+        sql_deleted = result.rowcount
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[去重] SQL去重失败: {e}")
+
+    # 方法2：Python标准化名称去重（处理括号/空格差异）
+    py_merged = _deduplicate_existing_partners(db)
+
+    total = sql_deleted + py_merged
+    return {"message": f"去重完成，共清理 {total} 个重复记录（精确匹配 {sql_deleted} 个，标准化匹配 {py_merged} 个）"}
 
 
 @router.post("")
@@ -133,10 +156,30 @@ def sync_partners_from_contracts(
     db: Session = Depends(get_db)
 ):
     """从合同中自动提取合作伙伴（去重），同时清理已有重复"""
-    # 第1步：清理数据库中已有的重复合作伙伴
+    # 第1步：SQL精确去重（完全相同名称）
+    sql_deleted = 0
+    try:
+        result = db.execute(
+            """
+            UPDATE partners SET is_deleted = 1
+            WHERE is_deleted = 0
+              AND id NOT IN (
+                SELECT MIN(id) FROM partners
+                WHERE is_deleted = 0
+                GROUP BY name
+              )
+            """
+        )
+        sql_deleted = result.rowcount
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[同步] SQL去重失败: {e}")
+
+    # 第2步：Python标准化名称去重（括号/空格差异）
     merged = _deduplicate_existing_partners(db)
 
-    # 第2步：从合同中提取新合作伙伴
+    # 第3步：从合同中提取新合作伙伴
     contracts = db.query(Contract).filter(
         Contract.is_deleted == False,
         Contract.parties != None,
@@ -161,9 +204,10 @@ def sync_partners_from_contracts(
                 created += 1
 
     db.commit()
+    total_dedup = sql_deleted + merged
     msg = f"同步完成，新增 {created} 个合作伙伴"
-    if merged > 0:
-        msg += f"，合并去重 {merged} 个"
+    if total_dedup > 0:
+        msg += f"，合并去重 {total_dedup} 个"
     return {"message": msg}
 
 

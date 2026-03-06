@@ -562,9 +562,12 @@ def download_payment(
     if not payment.file_path or not os.path.exists(payment.file_path):
         raise HTTPException(status_code=404, detail="文件不存在")
     
+    # 保留原始文件后缀名
+    ext = os.path.splitext(payment.file_path)[1]  # 如 .pdf
+    filename = (payment.description or "payment_file") + ext
     return FileResponse(
         payment.file_path, 
-        filename=payment.description or "payment_file",
+        filename=filename,
         media_type="application/octet-stream"
     )
 

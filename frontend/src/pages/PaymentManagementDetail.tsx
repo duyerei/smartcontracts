@@ -554,7 +554,9 @@ export function PaymentManagementDetail() {
                       const url = window.URL.createObjectURL(blob)
                       const a = document.createElement('a')
                       a.href = url
-                      a.download = payment.description || '付款附件'
+                      // 从 file_path 提取后缀名
+                      const ext = payment.file_path?.split('.').pop() || 'pdf'
+                      a.download = `${payment.description || '付款附件'}.${ext}`
                       document.body.appendChild(a)
                       a.click()
                       window.URL.revokeObjectURL(url)
