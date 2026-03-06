@@ -459,6 +459,8 @@ export const partnerApi = {
     fetchApi<{ message: string }>(`/partners/${id}`, { method: 'DELETE' }),
   syncFromContracts: async () =>
     fetchApi<{ message: string }>('/partners/sync-from-contracts'),
+  deduplicate: async () =>
+    fetchApi<{ message: string }>('/partners/deduplicate', { method: 'POST' }),
   uploadAttachment: async (partnerId: number, file: File) => {
     const formData = new FormData()
     formData.append('file', file)

@@ -1233,40 +1233,34 @@ def _async_reparse_process(contract_id: int, file_path_str: str):
 
         print(f"[异步重解析] 开始解析合同 {contract_id}，文件路径: {file_path_str}")
         
-        # 优先使用已有的raw_text，避免重复OCR（节省API调用和时间）
-        raw_text = contract.raw_text
+        # 重新解析时总是重新OCR，确保获取最新文本
+        raw_text = ""
         extracted = {}
         
-        if raw_text and len(raw_text) > 100:
-            print(f"[异步重解析] 使用已有OCR文本，长度: {len(raw_text)}")
-            # 从已有文本中提取基本信息
-            extracted = {
-                "contract_number": contract.contract_number,
-                "title": contract.title,
-                "parties": json.loads(contract.parties) if contract.parties else [],
-                "amount": contract.amount,
-                "contract_type": contract.contract_type,
-                "department": contract.department,
-                "signed_date": contract.signed_date.strftime("%Y-%m-%d") if contract.signed_date else None,
-                "start_date": contract.start_date.strftime("%Y-%m-%d") if contract.start_date else None,
-                "end_date": contract.end_date.strftime("%Y-%m-%d") if contract.end_date else None,
-            }
-        else:
-            # 如果没有raw_text，才重新OCR
-            print(f"[异步重解析] 没有已有OCR文本，重新OCR识别...")
-            try:
-                parse_result = contract_parser.parse_contract(file_path_str, "")
-                extracted = parse_result.get("data", {})
-                raw_text = parse_result.get("raw_text", "")
-                
-                print(f"[异步重解析] OCR解析完成，文本长度: {len(raw_text)}")
-                if len(raw_text) < 500:
-                    print(f"[异步重解析] 警告：文本太短，内容: {raw_text[:200]}")
+        print(f"[异步重解析] 重新OCR识别...")
+        try:
+            parse_result = contract_parser.parse_contract(file_path_str, "")
+            extracted = parse_result.get("data", {})
+            raw_text = parse_result.get("raw_text", "")
+            
+            print(f"[异步重解析] OCR解析完成，文本长度: {len(raw_text)}")
+            if len(raw_text) < 500:
+                print(f"[异步重解析] 警告：文本太短，内容: {raw_text[:200]}")
+                # 如果有旧文本，用旧文本继续LLM解析
+                if contract.raw_text and len(contract.raw_text) > 100:
+                    raw_text = contract.raw_text
+                    print(f"[异步重解析] 使用已有OCR文本继续，长度: {len(raw_text)}")
+                else:
                     return  # OCR失败，直接返回
-            except Exception as e:
-                print(f"[异步重解析] OCR解析失败: {e}")
-                import traceback
-                traceback.print_exc()
+        except Exception as e:
+            print(f"[异步重解析] OCR解析失败: {e}")
+            import traceback
+            traceback.print_exc()
+            # 如果有旧文本，用旧文本继续LLM解析
+            if contract.raw_text and len(contract.raw_text) > 100:
+                raw_text = contract.raw_text
+                print(f"[异步重解析] OCR失败，使用已有文本继续，长度: {len(raw_text)}")
+            else:
                 return
 
         # LLM增强解析

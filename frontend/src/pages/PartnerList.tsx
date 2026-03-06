@@ -18,6 +18,7 @@ export function PartnerList() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [syncing, setSyncing] = useState(false)
+  const [deduping, setDeduping] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState({ name: '', contact_name: '', contact_phone: '', address: '' })
   const [saving, setSaving] = useState(false)
@@ -54,6 +55,19 @@ export function PartnerList() {
     }
   }
 
+  const handleDedup = async () => {
+    setDeduping(true)
+    try {
+      const res = await partnerApi.deduplicate()
+      if (res.data) {
+        alert(res.data.message)
+        fetchPartners()
+      }
+    } finally {
+      setDeduping(false)
+    }
+  }
+
   const handleCreate = async () => {
     if (!form.name.trim()) return
     setSaving(true)
@@ -78,6 +92,10 @@ export function PartnerList() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">合作伙伴</h1>
         <div className="flex gap-2">
+          <Button variant="outline" onClick={handleDedup} disabled={deduping}>
+            <RefreshCw className={`h-4 w-4 mr-2 ${deduping ? 'animate-spin' : ''}`} />
+            去重
+          </Button>
           <Button variant="outline" onClick={handleSync} disabled={syncing}>
             <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
             从合同同步

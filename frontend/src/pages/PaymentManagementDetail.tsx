@@ -543,11 +543,28 @@ export function PaymentManagementDetail() {
                       </p>
                     </div>
                   </div>
-                  <Button variant="outline" size="sm" asChild>
-                    <a href={`/api/v1/payments/${payment.id}/download`} target="_blank" rel="noopener noreferrer">
-                      <Download className="h-4 w-4 mr-2" />
-                      下载
-                    </a>
+                  <Button variant="outline" size="sm" onClick={async () => {
+                    try {
+                      const token = localStorage.getItem('token')
+                      const response = await fetch(`/api/v1/payments/${payment.id}/download`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                      })
+                      if (!response.ok) throw new Error('下载失败')
+                      const blob = await response.blob()
+                      const url = window.URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = payment.description || '付款附件'
+                      document.body.appendChild(a)
+                      a.click()
+                      window.URL.revokeObjectURL(url)
+                      document.body.removeChild(a)
+                    } catch (e) {
+                      alert('下载失败')
+                    }
+                  }}>
+                    <Download className="h-4 w-4 mr-2" />
+                    下载
                   </Button>
                 </div>
               </CardContent>

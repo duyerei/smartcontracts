@@ -84,6 +84,16 @@ def list_partners(
     return {"partners": result, "total": total, "page": page, "page_size": page_size}
 
 
+@router.post("/deduplicate")
+def deduplicate_partners(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """手动触发合作伙伴去重"""
+    merged = _deduplicate_existing_partners(db)
+    return {"message": f"去重完成，合并了 {merged} 个重复记录"}
+
+
 @router.post("")
 def create_partner(
     data: dict,
