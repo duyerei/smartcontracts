@@ -95,9 +95,12 @@ def create_partner(
     if not name:
         raise HTTPException(status_code=400, detail="合作伙伴名称不能为空")
 
-    existing = db.query(Partner).filter(Partner.name == name, Partner.is_deleted == False).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="该合作伙伴已存在")
+    # 用标准化名称做去重检查
+    normalized = _normalize_name(name)
+    existing_partners = db.query(Partner).filter(Partner.is_deleted == False).all()
+    for p in existing_partners:
+        if _normalize_name(p.name) == normalized:
+            raise HTTPException(status_code=400, detail=f"该合作伙伴已存在（{p.name}）")
 
     partner = Partner(
         name=name,
@@ -119,7 +122,11 @@ def sync_partners_from_contracts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """从合同中自动提取合作伙伴（去重）"""
+    """从合同中自动提取合作伙伴（去重），同时清理已有重复"""
+    # 第1步：清理数据库中已有的重复合作伙伴
+    merged = _deduplicate_existing_partners(db)
+
+    # 第2步：从合同中提取新合作伙伴
     contracts = db.query(Contract).filter(
         Contract.is_deleted == False,
         Contract.parties != None,
@@ -128,9 +135,8 @@ def sync_partners_from_contracts(
     ).all()
 
     created = 0
-    # 预加载所有已有合作伙伴名称（标准化）
     existing_partners = db.query(Partner).filter(Partner.is_deleted == False).all()
-    existing_normalized = {_normalize_name(p.name) for p in existing_partners}
+    existing_normalized = {_normalize_name(p.name): p for p in existing_partners}
 
     for contract in contracts:
         names = _extract_partner_names(contract.parties)
@@ -139,12 +145,59 @@ def sync_partners_from_contracts(
                 continue
             normalized = _normalize_name(name)
             if normalized not in existing_normalized:
-                db.add(Partner(name=name))
-                existing_normalized.add(normalized)
+                partner = Partner(name=name)
+                db.add(partner)
+                existing_normalized[normalized] = partner
                 created += 1
 
     db.commit()
-    return {"message": f"同步完成，新增 {created} 个合作伙伴"}
+    msg = f"同步完成，新增 {created} 个合作伙伴"
+    if merged > 0:
+        msg += f"，合并去重 {merged} 个"
+    return {"message": msg}
+
+
+def _deduplicate_existing_partners(db: Session) -> int:
+    """清理数据库中已有的重复合作伙伴，保留最早创建的那条"""
+    partners = db.query(Partner).filter(Partner.is_deleted == False).order_by(Partner.created_at.asc()).all()
+
+    # 按标准化名称分组
+    groups: dict[str, list] = {}
+    for p in partners:
+        key = _normalize_name(p.name)
+        groups.setdefault(key, []).append(p)
+
+    merged = 0
+    for key, group in groups.items():
+        if len(group) <= 1:
+            continue
+        # 保留第一个（最早创建），其余标记删除
+        keep = group[0]
+        for dup in group[1:]:
+            # 把重复记录的附件转移到保留记录
+            db.query(PartnerAttachment).filter(
+                PartnerAttachment.partner_id == dup.id,
+                PartnerAttachment.is_deleted == False
+            ).update({"partner_id": keep.id})
+            # 合并联系信息（如果保留记录没有的话）
+            if not keep.contact_name and dup.contact_name:
+                keep.contact_name = dup.contact_name
+            if not keep.contact_phone and dup.contact_phone:
+                keep.contact_phone = dup.contact_phone
+            if not keep.address and dup.address:
+                keep.address = dup.address
+            if not keep.bank_name and dup.bank_name:
+                keep.bank_name = dup.bank_name
+            if not keep.bank_account and dup.bank_account:
+                keep.bank_account = dup.bank_account
+            if not keep.notes and dup.notes:
+                keep.notes = dup.notes
+            dup.is_deleted = True
+            merged += 1
+
+    if merged > 0:
+        db.commit()
+    return merged
 
 
 @router.get("/{partner_id}")
