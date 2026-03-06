@@ -96,6 +96,11 @@ async function fetchApi<T>(
     })
 
     if (!response.ok) {
+      if (response.status === 401) {
+        localStorage.removeItem('token')
+        window.location.href = '/login'
+        throw new Error('登录已过期，请重新登录')
+      }
       const errorData = await response.json().catch(() => ({}))
       throw new Error(errorData.detail || `HTTP error ${response.status}`)
     }

@@ -238,9 +238,23 @@ export function ContractDetail() {
         return
       }
       
-      // PDF、图片或未知类型：直接用带 token 的 URL，浏览器流式加载 + 利用缓存
+      // PDF、图片或未知类型：用 fetch + blob URL 避免 token query 参数问题
       setMainPreviewType(isImage ? 'image' : 'pdf')
-      setPreviewUrl(`/api/v1/contracts/${contractId}/download?mode=preview&token=${token}`)
+      const response = await fetch(`/api/v1/contracts/${contractId}/download?mode=preview`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('token')
+          window.location.href = '/login'
+          return
+        }
+        console.error('加载预览失败:', response.status)
+        return
+      }
+      const blob = await response.blob()
+      const blobUrl = window.URL.createObjectURL(blob)
+      setPreviewUrl(blobUrl)
     } catch (error) {
       console.error('加载预览失败:', error)
     }
@@ -597,6 +611,11 @@ export function ContractDetail() {
       })
       
       if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('token')
+          window.location.href = '/login'
+          return
+        }
         alert('预览失败')
         return
       }
@@ -659,9 +678,21 @@ export function ContractDetail() {
       const token = localStorage.getItem('token')
       
       if (ext === 'pdf' || ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext || '')) {
-        // PDF 和图片直接用带 token 的 URL，浏览器流式加载 + 利用缓存
-        const directUrl = `/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/download?token=${token}`
-        setAttachmentPreviewUrl(directUrl)
+        // PDF 和图片用 fetch + blob URL，避免 token query 参数认证问题
+        const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${attachment.id}/download`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        if (!response.ok) {
+          if (response.status === 401) {
+            localStorage.removeItem('token')
+            window.location.href = '/login'
+            return
+          }
+          throw new Error(`获取附件失败 (HTTP ${response.status})`)
+        }
+        const blob = await response.blob()
+        const blobUrl = window.URL.createObjectURL(blob)
+        setAttachmentPreviewUrl(blobUrl)
         setAttachmentPreviewType(ext === 'pdf' ? 'pdf' : 'image')
         setIsLoadingAttachment(false)
       } else if (ext === 'docx' || ext === 'doc') {

@@ -898,20 +898,22 @@ def get_contract_attachments(
 def download_contract_attachment(
     contract_id: int,
     attachment_id: int,
+    request: Request,
     mode: str = Query("download"),
     token: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    request: Request = None,
 ):
     """下载或预览合同附件。mode=preview 时内嵌显示，mode=download 时下载。支持 token query 参数。"""
     # 认证
     current_user = None
-    auth = request.headers.get("Authorization", "") if request else ""
+    auth = request.headers.get("Authorization", "")
+    print(f"[att-download] contract_id={contract_id}, attachment_id={attachment_id}, mode={mode}, has_auth_header={bool(auth)}, has_query_token={bool(token)}")
     if auth.startswith("Bearer "):
         current_user = verify_token(auth[7:], db)
     if current_user is None and token:
         current_user = verify_token(token, db)
     if current_user is None:
+        print(f"[att-download] 401 - no valid auth found")
         raise HTTPException(status_code=401, detail="未授权")
 
     attachment = db.query(ContractAttachment).filter(
@@ -1000,20 +1002,24 @@ def set_primary_attachment(
 @router.get("/{contract_id}/download")
 def download_contract(
     contract_id: int,
+    request: Request,
     mode: str = Query("download"),
     token: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    request: Request = None,
 ):
     """下载或预览合同文件。mode=preview 时内嵌显示，mode=download 时下载。支持 token query 参数（用于 iframe 直接加载）"""
     # 优先用 Authorization header，其次用 query token
     current_user = None
-    auth = request.headers.get("Authorization", "") if request else ""
+    auth = request.headers.get("Authorization", "")
+    print(f"[download] contract_id={contract_id}, mode={mode}, has_auth_header={bool(auth)}, has_query_token={bool(token)}")
     if auth.startswith("Bearer "):
         current_user = verify_token(auth[7:], db)
+        print(f"[download] auth header verify result: {current_user is not None}")
     if current_user is None and token:
         current_user = verify_token(token, db)
+        print(f"[download] query token verify result: {current_user is not None}")
     if current_user is None:
+        print(f"[download] 401 - no valid auth found")
         raise HTTPException(status_code=401, detail="未授权")
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:

@@ -476,15 +476,19 @@ async def get_contract_attachments(
 async def download_attachment(
     contract_id: int,
     attachment_id: int,
+    request: Request,
     token: Optional[str] = Query(None),
-    current_user: Optional[User] = Depends(get_current_user_optional),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """下载或预览合同附件。支持 token query 参数（用于 iframe 直接加载）"""
     from starlette.responses import Response, RedirectResponse
     from app.services import file_storage
-    
-    # 支持 query token
+
+    # 优先用 Authorization header，其次用 query token
+    current_user = None
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        current_user = verify_token(auth[7:], db)
     if current_user is None and token:
         current_user = verify_token(token, db)
     if current_user is None:

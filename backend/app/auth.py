@@ -58,12 +58,14 @@ def verify_token(token: str, db: Session) -> Optional[User]:
         payload = jwt.decode(token, config.JWT_SECRET_KEY, algorithms=[config.JWT_ALGORITHM])
         username: str = payload.get("sub")
         if not username:
+            print(f"[verify_token] token payload missing 'sub': {payload}")
             return None
         user = db.query(User).filter(User.username == username).first()
         if user and user.is_active:
             return user
-    except JWTError:
-        pass
+        print(f"[verify_token] user not found or inactive: username={username}")
+    except JWTError as e:
+        print(f"[verify_token] JWTError: {e}, token[:20]={token[:20]}...")
     return None
 
 
