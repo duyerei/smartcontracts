@@ -862,16 +862,155 @@ async def upload_contract_attachment(
         "created_at": attachment.created_at.isoformat(),
     }
 
+@router.get("/{contract_id}/attachments")
+def get_contract_attachments(
+    contract_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取合同附件列表"""
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+
+    attachments = db.query(ContractAttachment).filter(
+        ContractAttachment.contract_id == contract_id,
+        ContractAttachment.is_deleted == False
+    ).order_by(ContractAttachment.is_primary.desc(), ContractAttachment.created_at.asc()).all()
+
+    return {
+        "attachments": [
+            {
+                "id": att.id,
+                "file_name": att.file_name,
+                "file_path": att.file_path,
+                "file_size": att.file_size or 0,
+                "file_url": att.file_url,
+                "attachment_type": att.attachment_type,
+                "is_primary": att.is_primary,
+                "created_at": att.created_at.isoformat() if att.created_at else "",
+            }
+            for att in attachments
+        ]
+    }
+
+@router.get("/{contract_id}/attachments/{attachment_id}/download")
+def download_contract_attachment(
+    contract_id: int,
+    attachment_id: int,
+    mode: str = Query("download"),
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    """下载或预览合同附件。mode=preview 时内嵌显示，mode=download 时下载。支持 token query 参数。"""
+    # 认证
+    current_user = None
+    auth = request.headers.get("Authorization", "") if request else ""
+    if auth.startswith("Bearer "):
+        current_user = verify_token(auth[7:], db)
+    if current_user is None and token:
+        current_user = verify_token(token, db)
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="未授权")
+
+    attachment = db.query(ContractAttachment).filter(
+        ContractAttachment.id == attachment_id,
+        ContractAttachment.contract_id == contract_id,
+        ContractAttachment.is_deleted == False
+    ).first()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    if not attachment.file_path:
+        raise HTTPException(status_code=404, detail="附件文件路径为空")
+
+    full_path = file_storage.get_file_path(attachment.file_path)
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="附件文件不存在")
+
+    import mimetypes
+    ext = full_path.suffix.lower()
+    mime_map = {
+        ".pdf": "application/pdf",
+        ".doc": "application/msword",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+        ".tiff": "image/tiff",
+        ".tif": "image/tiff",
+        ".xls": "application/vnd.ms-excel",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+    media_type = mime_map.get(ext, mimetypes.guess_type(str(full_path))[0] or "application/octet-stream")
+
+    if mode == "preview":
+        from starlette.responses import FileResponse as StarletteFileResponse
+        return StarletteFileResponse(
+            path=str(full_path),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": "inline",
+                "Cache-Control": "private, max-age=3600",
+            }
+        )
+
+    return FileResponse(
+        path=str(full_path),
+        filename=attachment.file_name or f"attachment{ext}",
+        media_type=media_type
+    )
+
+@router.put("/{contract_id}/attachments/{attachment_id}/set-primary")
+def set_primary_attachment(
+    contract_id: int,
+    attachment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """设置主附件"""
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+
+    # 先清除该合同所有附件的主附件标记
+    db.query(ContractAttachment).filter(
+        ContractAttachment.contract_id == contract_id,
+        ContractAttachment.is_deleted == False
+    ).update({"is_primary": False})
+
+    # 设置目标附件为主附件
+    attachment = db.query(ContractAttachment).filter(
+        ContractAttachment.id == attachment_id,
+        ContractAttachment.contract_id == contract_id,
+        ContractAttachment.is_deleted == False
+    ).first()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    attachment.is_primary = True
+    db.commit()
+
+    return {"message": "主附件设置成功", "attachment_id": attachment_id}
+
 @router.get("/{contract_id}/download")
 def download_contract(
     contract_id: int,
     mode: str = Query("download"),
     token: Optional[str] = Query(None),
-    current_user: Optional[User] = Depends(get_current_user_optional),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    request: Request = None,
 ):
     """下载或预览合同文件。mode=preview 时内嵌显示，mode=download 时下载。支持 token query 参数（用于 iframe 直接加载）"""
-    # 支持 query token（用于 iframe 直接加载，无法设置 Authorization header）
+    # 优先用 Authorization header，其次用 query token
+    current_user = None
+    auth = request.headers.get("Authorization", "") if request else ""
+    if auth.startswith("Bearer "):
+        current_user = verify_token(auth[7:], db)
     if current_user is None and token:
         current_user = verify_token(token, db)
     if current_user is None:
