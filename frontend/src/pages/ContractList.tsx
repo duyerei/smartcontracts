@@ -1,8 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { 
   Search, 
-  Download, 
   AlertCircle
 } from 'lucide-react'
 import { 
@@ -49,7 +48,8 @@ export function ContractList() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [loading, setLoading] = useState(true)
-  const [searchQuery, setSearchQuery] = useState('')
+  const [searchParams] = useSearchParams()
+  const [searchQuery, setSearchQuery] = useState(searchParams.get('search') || '')
   const [typeFilter, setTypeFilter] = useState<string>('all')
   const [departmentFilter, setDepartmentFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<string>('all')
@@ -164,10 +164,6 @@ export function ContractList() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">合同管理</h1>
-        <Button variant="outline">
-          <Download className="h-4 w-4 mr-2" />
-          导出
-        </Button>
       </div>
 
       <Card>
@@ -327,7 +323,7 @@ export function ContractList() {
                           {contract.contractNumber}
                         </TableCell>
                         {/* 合同名称列：连接线 + 主/补标签 */}
-                        <TableCell className="relative min-w-[260px]">
+                        <TableCell className="relative min-w-[260px] max-w-[320px]">
                           <div className="flex items-center gap-2">
                             {/* 主合同：向下延伸的竖线（连接到子合同） */}
                             {!isChild && (contract as any).supplement_children?.length > 0 && (
@@ -348,7 +344,7 @@ export function ContractList() {
                                 <div className="w-7 flex-shrink-0" />
                               </>
                             )}
-                            <span className="truncate">
+                            <span className="truncate overflow-hidden" title={contract.title !== '解析中...' && contract.title !== '解析失败' ? contract.title : undefined}>
                               {contract.title === '解析中...' ? (
                                 <span className="inline-flex items-center gap-1.5 text-primary">
                                   <span className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />

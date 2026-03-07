@@ -8,7 +8,9 @@ import {
   TrendingUp,
   ArrowRight,
   CreditCard,
-  Upload
+  Upload,
+  Search,
+  Sparkles,
 } from 'lucide-react'
 import { 
   Card, 
@@ -28,6 +30,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { contractApi, paymentManagementApi } from '@/lib/api'
+import { Input } from '@/components/ui/input'
 import type { Contract } from '@/types'
 
 export function Dashboard() {
@@ -39,6 +42,7 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [paymentUploading, setPaymentUploading] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const contractFileRef = useRef<HTMLInputElement>(null)
   const paymentFileRef = useRef<HTMLInputElement>(null)
 
@@ -209,6 +213,29 @@ export function Dashboard() {
           </Card>
         ))}
       </div>
+
+      {/* 智能搜索 */}
+      <Card>
+        <CardContent className="pt-6">
+          <form onSubmit={(e) => { e.preventDefault(); if (searchQuery.trim()) navigate(`/contracts?search=${encodeURIComponent(searchQuery)}`) }}>
+            <div className="flex gap-3">
+              <div className="flex-1 relative">
+                <Search className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
+                <Input
+                  placeholder="搜索合同编号、名称、签约方..."
+                  className="pl-10 h-11"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+              <Button type="submit" className="h-11 px-6">
+                <Sparkles className="h-4 w-4 mr-2" />
+                搜索
+              </Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>

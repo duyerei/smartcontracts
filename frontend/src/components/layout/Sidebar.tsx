@@ -2,15 +2,13 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import { 
   LayoutDashboard, 
   FileText, 
-  Upload, 
-  Search, 
   Settings,
   Shield,
-  Users,
   LogOut,
   Download,
   CreditCard,
   Building2,
+  FolderInput,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
@@ -20,14 +18,12 @@ const navItems = [
   { to: '/contracts', icon: FileText, label: '合同管理' },
   { to: '/partners', icon: Building2, label: '合作伙伴' },
   { to: '/payments', icon: CreditCard, label: '付款管理' },
-  { to: '/upload', icon: Upload, label: '上传合同' },
-  { to: '/search', icon: Search, label: '智能搜索' },
+  { to: '/upload', icon: FolderInput, label: '数据导入' },
   { to: '/settings', icon: Settings, label: '系统设置' },
 ]
 
 const adminNavItems = [
-  { to: '/import', icon: Download, label: 'OA导入' },
-  { to: '/users', icon: Users, label: '用户管理' },
+  { to: '/import', icon: Download, label: 'OA导入(旧)' },
 ]
 
 export function Sidebar() {
@@ -55,23 +51,7 @@ export function Sidebar() {
           <NavLink
             key={item.to}
             to={item.to}
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors",
-                isActive
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              )
-            }
-          >
-            <item.icon className="h-5 w-5" />
-            {item.label}
-          </NavLink>
-        ))}
-        {user?.role === 'admin' && adminNavItems.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
+            end={item.to === '/'}
             className={({ isActive }) =>
               cn(
                 "flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors",

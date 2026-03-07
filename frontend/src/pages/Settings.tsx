@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
 import { 
   Key, 
   Server, 
@@ -10,7 +11,13 @@ import {
   CheckCircle,
   XCircle,
   GitCommit,
-  Tag
+  Tag,
+  Users,
+  Pencil,
+  ShieldCheck,
+  User,
+  Check,
+  X,
 } from 'lucide-react'
 import { 
   Card, 
@@ -47,6 +54,26 @@ interface MCPConnection {
   lastConnected: string | null
 }
 
+interface UserItem {
+  id: number
+  username: string
+  real_name: string
+  department: string
+  role: string
+  is_active: boolean
+  created_at: string | null
+}
+
+interface UserForm {
+  username: string
+  password: string
+  real_name: string
+  department: string
+  role: 'admin' | 'user'
+}
+
+const emptyUserForm: UserForm = { username: '', password: '', real_name: '', department: '', role: 'user' }
+
 const mockAPIKeys: APIKey[] = [
   { id: '1', name: '生产环境API', key: 'sk-**** **** **** ****', createdAt: '2025-01-15', lastUsed: '2025-01-28', status: 'active' },
   { id: '2', name: '测试环境API', key: 'sk-**** **** **** ****', createdAt: '2025-01-10', lastUsed: '2025-01-25', status: 'active' },
@@ -58,6 +85,16 @@ const mockMCPConnections: MCPConnection[] = [
 ]
 
 const releaseLog = [
+  {
+    version: 'v1.4.0',
+    date: '2026-03-07',
+    items: [
+      'UI重构：导航精简，新增"数据导入"模块，整合合同导入、付款单导入、OA批量导入',
+      '工作台新增智能搜索入口，直接跳转合同列表并带入关键词',
+      '用户管理并入系统设置，减少导航层级',
+      '合同列表删除导出按钮，合同名称超长自动截断，悬浮显示完整名称',
+    ],
+  },
   {
     version: 'v1.3.0',
     date: '2026-03-06',
@@ -105,7 +142,7 @@ const releaseLog = [
   },
 ]
 
-type TabKey = 'api' | 'mcp' | 'security' | 'logs' | 'changelog'
+type TabKey = 'api' | 'mcp' | 'security' | 'logs' | 'changelog' | 'users'
 
 const tabs: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: 'api', label: 'API管理', icon: <Key className="h-4 w-4" /> },
@@ -113,13 +150,41 @@ const tabs: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: 'security', label: '安全设置', icon: <Shield className="h-4 w-4" /> },
   { key: 'logs', label: '审计日志', icon: <Activity className="h-4 w-4" /> },
   { key: 'changelog', label: '版本日志', icon: <GitCommit className="h-4 w-4" /> },
+  { key: 'users', label: '用户管理', icon: <Users className="h-4 w-4" /> },
 ]
 
 export function SettingsPage() {
+  const { token } = useAuth()
   const [apiKeys, setAPIKeys] = useState<APIKey[]>(mockAPIKeys)
   const [mcpConnections, setMCPConnections] = useState<MCPConnection[]>(mockMCPConnections)
   const [newKeyName, setNewKeyName] = useState('')
   const [activeTab, setActiveTab] = useState<TabKey>('api')
+
+  // 用户管理状态
+  const [users, setUsers] = useState<UserItem[]>([])
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [showUserForm, setShowUserForm] = useState(false)
+  const [editUserId, setEditUserId] = useState<number | null>(null)
+  const [userForm, setUserForm] = useState<UserForm>(emptyUserForm)
+  const [userError, setUserError] = useState('')
+  const [userSaving, setUserSaving] = useState(false)
+
+  const authHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+
+  const fetchUsers = useCallback(async () => {
+    setUsersLoading(true)
+    try {
+      const r = await fetch(`${API_BASE_URL}/auth/users`, { headers: authHeaders })
+      if (r.ok) setUsers(await r.json())
+    } finally {
+      setUsersLoading(false)
+    }
+  }, [token])
+
+  useEffect(() => {
+    if (activeTab === 'users') fetchUsers()
+  }, [activeTab, fetchUsers])
 
   const copyToClipboard = (text: string) => navigator.clipboard.writeText(text)
 
@@ -424,6 +489,144 @@ export function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* 用户管理 */}
+      {activeTab === 'users' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">管理系统用户，分配角色与权限</p>
+            <Button onClick={() => { setEditUserId(null); setUserForm(emptyUserForm); setUserError(''); setShowUserForm(true) }}>
+              <Plus className="h-4 w-4 mr-1" />新增用户
+            </Button>
+          </div>
+
+          {showUserForm && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">{editUserId ? '编辑用户' : '新增用户'}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-sm font-medium">用户名 *</label>
+                    <Input value={userForm.username} onChange={(e) => setUserForm({ ...userForm, username: e.target.value })} disabled={!!editUserId} placeholder="登录用户名" />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium">{editUserId ? '新密码（留空不修改）' : '密码 *'}</label>
+                    <Input type="password" value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} placeholder={editUserId ? '留空不修改' : '至少6位'} />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium">姓名</label>
+                    <Input value={userForm.real_name} onChange={(e) => setUserForm({ ...userForm, real_name: e.target.value })} placeholder="真实姓名" />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium">部门</label>
+                    <Input value={userForm.department} onChange={(e) => setUserForm({ ...userForm, department: e.target.value })} placeholder="所属部门" />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-sm font-medium">角色</label>
+                  <div className="flex gap-4 mt-1">
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" name="role" checked={userForm.role === 'user'} onChange={() => setUserForm({ ...userForm, role: 'user' })} />普通用户
+                    </label>
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" name="role" checked={userForm.role === 'admin'} onChange={() => setUserForm({ ...userForm, role: 'admin' })} />管理员
+                    </label>
+                  </div>
+                </div>
+                {userError && <div className="text-sm text-destructive">{userError}</div>}
+                <div className="flex gap-2">
+                  <Button disabled={userSaving} onClick={async () => {
+                    setUserError('')
+                    if (!userForm.username.trim()) { setUserError('用户名不能为空'); return }
+                    if (!editUserId && userForm.password.length < 6) { setUserError('密码至少6位'); return }
+                    if (editUserId && userForm.password && userForm.password.length < 6) { setUserError('密码至少6位'); return }
+                    setUserSaving(true)
+                    try {
+                      const url = editUserId ? `${API_BASE_URL}/auth/users/${editUserId}` : `${API_BASE_URL}/auth/users`
+                      const method = editUserId ? 'PUT' : 'POST'
+                      const body = editUserId
+                        ? JSON.stringify({ real_name: userForm.real_name, department: userForm.department, role: userForm.role, ...(userForm.password ? { password: userForm.password } : {}) })
+                        : JSON.stringify(userForm)
+                      const r = await fetch(url, { method, headers: authHeaders, body })
+                      if (!r.ok) { const err = await r.json().catch(() => ({})); setUserError(err.detail || '操作失败'); return }
+                      setShowUserForm(false)
+                      fetchUsers()
+                    } finally { setUserSaving(false) }
+                  }}>{userSaving ? '保存中...' : '保存'}</Button>
+                  <Button variant="outline" onClick={() => setShowUserForm(false)}>取消</Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <Card>
+            <CardContent className="p-0">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-muted/50">
+                    <th className="px-4 py-3 text-left font-medium">用户名</th>
+                    <th className="px-4 py-3 text-left font-medium">姓名</th>
+                    <th className="px-4 py-3 text-left font-medium">部门</th>
+                    <th className="px-4 py-3 text-left font-medium">角色</th>
+                    <th className="px-4 py-3 text-left font-medium">状态</th>
+                    <th className="px-4 py-3 text-left font-medium">创建时间</th>
+                    <th className="px-4 py-3 text-right font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usersLoading ? (
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">加载中...</td></tr>
+                  ) : users.length === 0 ? (
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">暂无用户</td></tr>
+                  ) : users.map((u) => (
+                    <tr key={u.id} className="border-b last:border-0 hover:bg-muted/30">
+                      <td className="px-4 py-2.5 font-medium">{u.username}</td>
+                      <td className="px-4 py-2.5">{u.real_name || '-'}</td>
+                      <td className="px-4 py-2.5">{u.department || '-'}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${u.role === 'admin' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
+                          {u.role === 'admin' ? <ShieldCheck className="h-3 w-3" /> : <User className="h-3 w-3" />}
+                          {u.role === 'admin' ? '管理员' : '普通用户'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${u.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                          {u.is_active ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
+                          {u.is_active ? '启用' : '禁用'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{u.created_at ? u.created_at.replace('T', ' ').split('.')[0] : '-'}</td>
+                      <td className="px-4 py-2.5 text-right">
+                        <div className="flex justify-end gap-1">
+                          <Button size="sm" variant="ghost" title="编辑" onClick={() => {
+                            setEditUserId(u.id)
+                            setUserForm({ username: u.username, password: '', real_name: u.real_name, department: u.department, role: u.role as 'admin' | 'user' })
+                            setUserError('')
+                            setShowUserForm(true)
+                          }}><Pencil className="h-3.5 w-3.5" /></Button>
+                          <Button size="sm" variant="ghost" title={u.is_active ? '禁用' : '启用'} onClick={async () => {
+                            await fetch(`${API_BASE_URL}/auth/users/${u.id}`, { method: 'PUT', headers: authHeaders, body: JSON.stringify({ is_active: !u.is_active }) })
+                            fetchUsers()
+                          }}>{u.is_active ? <X className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}</Button>
+                          {u.username !== 'admin' && (
+                            <Button size="sm" variant="ghost" className="text-destructive" title="删除" onClick={async () => {
+                              if (!confirm(`确定删除用户「${u.real_name || u.username}」？`)) return
+                              await fetch(`${API_BASE_URL}/auth/users/${u.id}`, { method: 'DELETE', headers: authHeaders })
+                              fetchUsers()
+                            }}><Trash2 className="h-3.5 w-3.5" /></Button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        </div>
       )}
     </div>
   )
