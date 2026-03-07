@@ -1,15 +1,7 @@
-FROM python:3.12-slim
-
-# 安装 LibreOffice（用于 .doc 转 PDF）和系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libreoffice-writer \
-    libreoffice-calc \
-    fonts-wqy-zenhei \
-    fonts-wqy-microhei \
-    poppler-utils \
-    curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# 使用本地预构建的基础镜像（含 LibreOffice），避免每次重新下载
+# 首次部署需在服务器上先构建基础镜像：
+#   docker build -t contract-base:latest -f Dockerfile.base .
+FROM contract-base:latest
 
 WORKDIR /app
 
