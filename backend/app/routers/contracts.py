@@ -28,6 +28,65 @@ router = APIRouter(prefix="/contracts", tags=["合同管理"])
 # LLM 返回的无效值列表
 _INVALID_LLM_VALUES = {"未提及", "未知", "无", "null", "None", "N/A", "不详", "未识别", "未找到", "暂无", ""}
 
+def _cn_amount_to_float(cn_str: str) -> Optional[float]:
+    """中文大写金额转浮点数（如 陆仟元整 -> 6000.0，壹拾叁万元整 -> 130000.0）"""
+    cn_str = cn_str.replace("整", "").replace("元", "").replace("人民币", "").replace("（", "").replace("）", "").strip()
+    cn_num = {
+        '零': 0, '壹': 1, '贰': 2, '叁': 3, '肆': 4,
+        '伍': 5, '陆': 6, '柒': 7, '捌': 8, '玖': 9,
+        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9,
+    }
+    cn_unit = {
+        '拾': 10, '佰': 100, '仟': 1000, '千': 1000,
+        '万': 10000, '亿': 100000000,
+        '十': 10, '百': 100,
+    }
+    if not any(c in cn_num or c in cn_unit for c in cn_str):
+        return None
+    total = 0
+    current = 0
+    wan_part = 0
+    for char in cn_str:
+        if char in cn_num:
+            current = cn_num[char]
+        elif char in cn_unit:
+            unit = cn_unit[char]
+            if unit == 10000:
+                wan_part = (wan_part + total + (current if current else 0)) * unit
+                total = 0
+                current = 0
+            elif unit == 100000000:
+                wan_part = (wan_part + total + current) * unit
+                total = 0
+                current = 0
+            else:
+                if current == 0 and unit == 10:
+                    current = 1
+                total += current * unit
+                current = 0
+    total += current
+    result = wan_part + total
+    return float(result) if result > 0 else None
+
+
+def _parse_amount_str(amount_str: str) -> Optional[float]:
+    """解析金额字符串，支持阿拉伯数字和中文大写"""
+    if not amount_str:
+        return None
+    s = str(amount_str).strip()
+    # 先尝试提取阿拉伯数字
+    clean = s.replace("元", "").replace(",", "").replace("，", "").replace("¥", "").replace("￥", "").replace("人民币", "")
+    numbers = re.findall(r'[\d]+\.?\d*', clean)
+    if numbers:
+        try:
+            return float(numbers[0])
+        except Exception:
+            pass
+    # 再尝试中文大写
+    return _cn_amount_to_float(s)
+
+
 def _is_valid_llm_value(val) -> bool:
     """判断 LLM 返回值是否有效（非空、非占位符）"""
     if val is None:
@@ -466,7 +525,16 @@ def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
         note = parse_result.get("note", "")
 
         # 更新基础字段
-        contract.contract_number = extracted["contract_number"]
+        # 合同编号去重：如果提取到的编号已被其他合同占用，加后缀避免唯一约束冲突
+        extracted_number = extracted["contract_number"]
+        existing = db.query(Contract).filter(
+            Contract.contract_number == extracted_number,
+            Contract.id != contract_id,
+            Contract.is_deleted == False
+        ).first()
+        if existing:
+            extracted_number = f"{extracted_number}-{contract_id}"
+        contract.contract_number = extracted_number
         contract.title = extracted["title"]
         contract.contract_type = extracted["contract_type"]
         contract.department = extracted["department"]
@@ -506,19 +574,34 @@ def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
             _async_llm_process_with_db(db, contract, raw_text)
 
     except Exception as e:
+        import traceback
         print(f"[异步解析] 合同 {contract_id} 解析失败: {e}")
-        # 标记解析失败
+        traceback.print_exc()
+        # 标记解析失败 - 用全新的 session 避免旧 session 处于错误状态
         try:
-            contract = db.query(Contract).filter(Contract.id == contract_id).first()
-            if contract and contract.title == "解析中...":
-                contract.title = "解析失败"
-                contract.summary = f"自动解析失败: {str(e)}"
-                contract.updated_at = datetime.now()
-                db.commit()
+            db.close()
         except Exception:
             pass
+        try:
+            from app.database import SessionLocal as _SL
+            _db2 = _SL()
+            try:
+                _c = _db2.query(Contract).filter(Contract.id == contract_id).first()
+                if _c and _c.title in ("解析中...", ""):
+                    _c.title = "解析失败"
+                    _c.summary = f"自动解析失败: {str(e)}"
+                    _c.updated_at = datetime.now()
+                    _db2.commit()
+            finally:
+                _db2.close()
+        except Exception as e2:
+            print(f"[异步解析] 标记失败状态时出错: {e2}")
+        return
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def _async_llm_process_with_db(db, contract, raw_text: str):
@@ -541,14 +624,17 @@ def _async_llm_process_with_db(db, contract, raw_text: str):
             if parties_list:
                 contract.parties = json.dumps(parties_list, ensure_ascii=False)
 
-            if llm_result.get("服务费用总额"):
-                amount_str = str(llm_result["服务费用总额"])
-                numbers = re.findall(r'[\d]+\.?\d*', amount_str.replace(',', '').replace('，', ''))
-                if numbers:
-                    try:
-                        contract.amount = float(numbers[0])
-                    except Exception:
-                        pass
+            if llm_result.get("服务费用总额") or llm_result.get("合同金额") or llm_result.get("合同标额") or llm_result.get("合同总金额") or llm_result.get("合同价款"):
+                amount_str = str(
+                    llm_result.get("服务费用总额") or
+                    llm_result.get("合同金额") or
+                    llm_result.get("合同标额") or
+                    llm_result.get("合同总金额") or
+                    llm_result.get("合同价款") or ""
+                )
+                parsed = _parse_amount_str(amount_str)
+                if parsed:
+                    contract.amount = parsed
 
             def _try_parse_date(date_str):
                 if not date_str or date_str in (None, "null", ""):
@@ -623,16 +709,19 @@ def _async_llm_process(contract_id: int, raw_text: str):
                     contract.parties = json.dumps(parties_list, ensure_ascii=False)
                     print(f"[异步] 更新甲乙方: {parties_list}")
 
-                # 金额
-                if llm_result.get("服务费用总额"):
-                    amount_str = str(llm_result["服务费用总额"])
-                    numbers = re.findall(r'[\d]+\.?\d*', amount_str.replace(',', '').replace('，', ''))
-                    if numbers:
-                        try:
-                            contract.amount = float(numbers[0])
-                            print(f"[异步] 更新金额: {contract.amount}")
-                        except Exception:
-                            pass
+                # 金额（兼容多种字段名和中文大写）
+                amount_val = (
+                    llm_result.get("服务费用总额") or
+                    llm_result.get("合同金额") or
+                    llm_result.get("合同标额") or
+                    llm_result.get("合同总金额") or
+                    llm_result.get("合同价款") or ""
+                )
+                if amount_val:
+                    parsed = _parse_amount_str(str(amount_val))
+                    if parsed:
+                        contract.amount = parsed
+                        print(f"[异步] 更新金额: {contract.amount}")
 
                 # 日期字段
                 def _try_parse_date(date_str):
@@ -807,6 +896,8 @@ def delete_contract(
         raise HTTPException(status_code=404, detail="合同不存在")
     
     contract.is_deleted = True
+    # 软删除时释放合同编号，避免唯一约束阻止重新上传同一份合同
+    contract.contract_number = f"{contract.contract_number}__deleted_{contract.id}"
     contract.updated_at = datetime.now()
     db.commit()
     
@@ -1334,19 +1425,21 @@ def _async_reparse_process(contract_id: int, file_path_str: str):
         contract.contract_type = extracted.get("contract_type", contract.contract_type)
         contract.department = extracted.get("department", contract.department)
         
-        # 优先使用LLM识别的金额
-        if llm_result.get("服务费用总额"):
-            # 尝试从大写数字中提取金额
-            amount_str = llm_result["服务费用总额"]
-            # 简单处理：提取数字
-            import re
-            numbers = re.findall(r'\d+\.?\d*', amount_str.replace(',', '').replace('，', ''))
-            if numbers:
-                try:
-                    contract.amount = float(numbers[0])
-                except:
-                    pass
-        elif extracted.get("amount"):
+        # 优先使用LLM识别的金额（兼容多种字段名）
+        llm_amount_str = (
+            llm_result.get("服务费用总额") or
+            llm_result.get("合同金额") or
+            llm_result.get("合同标额") or
+            llm_result.get("合同总金额") or
+            llm_result.get("合同价款") or
+            llm_result.get("总金额") or ""
+        )
+        if llm_amount_str and str(llm_amount_str) not in ["null", "None", ""]:
+            parsed = _parse_amount_str(str(llm_amount_str))
+            if parsed:
+                contract.amount = parsed
+                print(f"[异步重解析] LLM金额: {contract.amount}")
+        if not contract.amount and extracted.get("amount"):
             contract.amount = extracted.get("amount")
         
         # 更新日期字段 - 优先使用LLM识别的日期
@@ -1979,6 +2072,20 @@ def _merge_llm_result(extracted: dict, llm_result: dict) -> dict:
     elif llm_result.get("服务期限结束日期") == "null":
         # 如果LLM明确返回null，说明合同没有结束日期
         result["end_date"] = None
+
+    # 合同金额（兼容多种字段名）
+    llm_amount_str = (
+        llm_result.get("服务费用总额") or
+        llm_result.get("合同金额") or
+        llm_result.get("合同标额") or
+        llm_result.get("合同总金额") or
+        llm_result.get("合同价款") or
+        llm_result.get("总金额") or ""
+    )
+    if llm_amount_str and str(llm_amount_str) not in ["null", "None", ""]:
+        parsed = _parse_amount_str(str(llm_amount_str))
+        if parsed:
+            result["amount"] = parsed
 
     # 保存LLM结果到extracted_data
     result["llm_data"] = llm_result
