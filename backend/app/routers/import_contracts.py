@@ -761,12 +761,29 @@ async def analyze_attachment(
                                     pass
                             
                             # 解析金额（支持中文大写和阿拉伯数字）
-                            amount_val = llm_result.get("服务费用总额", "")
+                            # 尝试多个可能的字段名
+                            amount_val = (
+                                llm_result.get("服务费用总额") or
+                                llm_result.get("合同金额") or
+                                llm_result.get("合同标额") or
+                                llm_result.get("合同总金额") or
+                                llm_result.get("合同价款") or
+                                llm_result.get("总金额") or
+                                ""
+                            )
                             if amount_val and str(amount_val) not in ["null", "未知", "未提及", "None", ""]:
                                 parsed_amount = parse_amount(str(amount_val))
                                 if parsed_amount and parsed_amount > 0:
                                     contract_to_update.amount = parsed_amount
                                     print(f"[OA附件解析] 金额: {parsed_amount}")
+                            
+                            # 如果LLM字段没提取到金额，尝试从raw_text正则提取
+                            if not (contract_to_update.amount and contract_to_update.amount > 0):
+                                from app.services.contract_parser import contract_parser as cp
+                                regex_amount = cp._extract_amount(raw_text)
+                                if regex_amount and regex_amount > 0:
+                                    contract_to_update.amount = regex_amount
+                                    print(f"[OA附件解析] 正则提取金额: {regex_amount}")
                         
                         # 存储解析摘要
                         if contract_to_update.source == 'oa_import':
