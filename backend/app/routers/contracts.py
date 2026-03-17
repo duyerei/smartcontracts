@@ -71,13 +71,22 @@ def _cn_amount_to_float(cn_str: str) -> Optional[float]:
 
 
 def _parse_amount_str(amount_str: str) -> Optional[float]:
-    """解析金额字符串，支持阿拉伯数字和中文大写"""
+    """解析金额字符串，支持阿拉伯数字（含万元）和中文大写"""
     if not amount_str:
         return None
     s = str(amount_str).strip()
-    # 先尝试提取阿拉伯数字
-    clean = s.replace("元", "").replace(",", "").replace("，", "").replace("¥", "").replace("￥", "").replace("人民币", "")
-    numbers = re.findall(r'[\d]+\.?\d*', clean)
+    # 先尝试提取阿拉伯数字，注意处理"万"倍数
+    clean = s.replace(",", "").replace("，", "").replace("¥", "").replace("￥", "").replace("人民币", "")
+    # 匹配带"万"的数字，如 13万、13.5万
+    wan_match = re.search(r'([\d]+\.?\d*)\s*万', clean)
+    if wan_match:
+        try:
+            return float(wan_match.group(1)) * 10000
+        except Exception:
+            pass
+    # 普通数字
+    clean2 = clean.replace("元", "")
+    numbers = re.findall(r'[\d]+\.?\d*', clean2)
     if numbers:
         try:
             return float(numbers[0])
@@ -1089,6 +1098,36 @@ def set_primary_attachment(
     db.commit()
 
     return {"message": "主附件设置成功", "attachment_id": attachment_id}
+
+
+@router.delete("/{contract_id}/attachments/{attachment_id}")
+def delete_contract_attachment(
+    contract_id: int,
+    attachment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """删除合同附件（主附件不允许删除）"""
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+
+    attachment = db.query(ContractAttachment).filter(
+        ContractAttachment.id == attachment_id,
+        ContractAttachment.contract_id == contract_id,
+        ContractAttachment.is_deleted == False
+    ).first()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    if attachment.is_primary:
+        raise HTTPException(status_code=400, detail="主附件不允许删除")
+
+    attachment.is_deleted = True
+    db.commit()
+
+    return {"message": "附件已删除"}
+
 
 @router.get("/{contract_id}/download")
 def download_contract(
@@ -2308,6 +2347,10 @@ async def import_oa_flow_pdf(
         for oa_key, db_field in field_map.items():
             val = oa_fields.get(oa_key)
             if val and str(val).lower() not in ('null', 'none', ''):
+                # counterparty_contact 如果是纯数字（电话号码），不要存为对方联系人
+                # OA表单的"对方联系人"字段有时存的是我方申请人的电话
+                if oa_key == 'counterparty_contact' and _re.match(r'^\d{7,13}$', str(val).strip()):
+                    continue
                 setattr(contract, db_field, str(val))
                 updated_fields.append(db_field)
 
@@ -2331,7 +2374,12 @@ async def import_oa_flow_pdf(
                 pass
         # 清除旧的 summary 原文垃圾数据
         existing_raw.pop('summary', None)
-        existing_raw.update({k: v for k, v in oa_fields.items() if v and k != 'summary' and str(v).lower() not in ('null', 'none')})
+        # 合并 oa_fields 到 raw_data，但排除纯数字的 counterparty_contact
+        for k, v in oa_fields.items():
+            if v and k != 'summary' and str(v).lower() not in ('null', 'none'):
+                if k == 'counterparty_contact' and _re.match(r'^\d{7,13}$', str(v).strip()):
+                    continue  # 跳过纯数字的 counterparty_contact
+                existing_raw[k] = v
         existing_raw['doc_subject'] = oa_fields.get('doc_subject') or existing_raw.get('doc_subject', '')
         # 只在LLM成功提取了有意义的摘要时才写入（避免把PDF原文存进去）
         llm_summary = oa_fields.get('summary', '')

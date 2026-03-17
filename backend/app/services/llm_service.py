@@ -441,8 +441,22 @@ class LLMService:
             if any(phrase in result_text for phrase in invalid_phrases):
                 print("LLM返回无效内容，跳过")
                 return ""
-            return result_text.strip()
+            return self._fix_markdown_tables(result_text.strip())
         return ""
+
+    def _fix_markdown_tables(self, text: str) -> str:
+        """修复LLM生成的Markdown中被缩进/嵌套的表格，确保表格行顶格输出"""
+        lines = text.split('\n')
+        result = []
+        for line in lines:
+            # 如果是缩进的表格行（以空格/tab开头，且包含 | 符号）
+            stripped = line.lstrip()
+            if stripped.startswith('|') and stripped.endswith('|') and line != stripped:
+                # 去掉缩进，顶格输出
+                result.append(stripped)
+            else:
+                result.append(line)
+        return '\n'.join(result)
 
 
     def analyze_risk(self, text: str) -> str:

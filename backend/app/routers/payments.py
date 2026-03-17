@@ -572,6 +572,50 @@ def download_payment(
     )
 
 
+@router.put("/management/{payment_id}")
+def update_payment_management(
+    payment_id: int,
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """更新付款管理记录"""
+    payment = db.query(Payment).filter(
+        Payment.id == payment_id,
+        Payment.is_deleted == False
+    ).first()
+
+    if not payment:
+        raise HTTPException(status_code=404, detail="付款记录不存在")
+
+    allowed_fields = {
+        "payment_theme", "payment_date", "amount", "operator",
+        "cost_center", "project_name", "contract_number",
+        "application_number", "payment_reason", "counterparty", "description"
+    }
+
+    for key, value in data.items():
+        if key in allowed_fields:
+            if key == "payment_date" and value:
+                try:
+                    from datetime import datetime as dt
+                    payment.payment_date = dt.strptime(value, "%Y-%m-%d")
+                except (ValueError, TypeError):
+                    payment.payment_date = value
+            elif key == "amount" and value is not None:
+                try:
+                    setattr(payment, key, float(value))
+                except (ValueError, TypeError):
+                    pass
+            else:
+                setattr(payment, key, value)
+
+    db.commit()
+    db.refresh(payment)
+
+    return {"message": "更新成功"}
+
+
 @router.delete("/{payment_id}")
 def delete_payment(
     payment_id: int,
@@ -591,3 +635,5 @@ def delete_payment(
     db.commit()
     
     return {"message": "付款记录删除成功"}
+
+

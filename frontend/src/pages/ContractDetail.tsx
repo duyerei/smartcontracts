@@ -447,6 +447,9 @@ export function ContractDetail() {
           // 后台OCR+正则解析完成，自动触发SSE LLM解析
           if (c.title !== '解析中...' && c.title !== '解析失败') {
             startParseStream(id)
+          } else if (pollCount >= maxPolls && c.title === '解析中...') {
+            // 超时：强制更新显示，提示用户手动重新解析
+            setContract({ ...c, title: '解析超时', summary: '自动解析超时，请点击"重新解析"按钮手动触发解析。' })
           }
         }
       }
@@ -1124,6 +1127,51 @@ export function ContractDetail() {
                             : (contract as any).rawData
                         } catch {}
                       }
+
+                      // 从复合key中解析对方经办人、地址、电话
+                      // 后端导入时已解析并存入 counterpartyContact/counterpartyAddress/_counterparty_phone
+                      const parseCounterpartyInfo = () => {
+                        const contact = contract.counterpartyContact || ''
+                        const address = contract.counterpartyAddress || oaRaw['counterparty_address'] || ''
+                        const phone = oaRaw['_counterparty_phone'] || ''
+                        // 如果 counterpartyContact 看起来是电话号码（纯数字），说明旧数据未解析，尝试从复合key解析
+                        const isPhone = /^\d{7,13}$/.test(contact.trim())
+                        if (isPhone || !contact) {
+                          // 尝试从复合key解析（兼容旧数据）
+                          for (const key of Object.keys(oaRaw)) {
+                            if (key.endsWith('_2')) continue
+                            if (key.includes('对方名称') && key.includes('对方经办人') && key.includes('地址') && key.includes('电话')) {
+                              const braceIdx = key.indexOf('{1}')
+                              const dataStr = braceIdx >= 0 ? key.slice(braceIdx + 3).trim() : key
+                              const stripped = dataStr.replace(/^\d+\s*/, '').trim()
+                              const phoneMatch = stripped.match(/(\d{7,13})\s*$/)
+                              const parsedPhone = phoneMatch ? phoneMatch[1] : ''
+                              const withoutPhone = parsedPhone ? stripped.slice(0, stripped.lastIndexOf(parsedPhone)).trim() : stripped
+                              const addrMatch = withoutPhone.match(/(.{2,}(?:省|市|区|县|路|街|号|楼|层|座).+)/)
+                              const parsedAddress = addrMatch ? addrMatch[1].trim() : ''
+                              const counterpartyName = contract.counterparty || ''
+                              let parsedContact = ''
+                              if (counterpartyName && withoutPhone.includes(counterpartyName)) {
+                                const afterCompany = withoutPhone.slice(withoutPhone.indexOf(counterpartyName) + counterpartyName.length).trim()
+                                parsedContact = parsedAddress && afterCompany.includes(parsedAddress)
+                                  ? afterCompany.slice(0, afterCompany.indexOf(parsedAddress)).trim()
+                                  : afterCompany.trim()
+                              } else {
+                                const companyMatch = withoutPhone.match(/^(.+(?:公司|集团|有限|股份|机构|中心|部门|局|院|所))\s*(.*)$/)
+                                if (companyMatch) {
+                                  const afterCo = companyMatch[2].trim()
+                                  parsedContact = parsedAddress && afterCo.includes(parsedAddress)
+                                    ? afterCo.slice(0, afterCo.indexOf(parsedAddress)).trim()
+                                    : afterCo.trim()
+                                }
+                              }
+                              return { contact: parsedContact, address: parsedAddress, phone: parsedPhone }
+                            }
+                          }
+                        }
+                        return { contact: isPhone ? '' : contact, address, phone: isPhone ? contact : phone }
+                      }
+                      const cpInfo = parseCounterpartyInfo()
                       // 判断是否有OA流程数据：rawData有内容，或合同本身有OA字段
                       const hasOaData = Object.keys(oaRaw).length > 0 || 
                         contract.applicant || contract.company || 
@@ -1147,6 +1195,7 @@ export function ContractDetail() {
                               )}
                               {[
                                 { label: '申请人', value: oaRaw['applicant'] || oaRaw['申请人'] || oaRaw['申请人姓名'] || contract.applicant },
+                                { label: '申请时间', value: oaRaw['doc_create_time'] || oaRaw['create_date'] || oaRaw['创建时间'] || oaRaw['申请时间'] || oaRaw['申请日期'] || null },
                                 { label: '申请单号', value: oaRaw['doc_number'] || oaRaw['申请单编号'] || oaRaw['申请单号'] },
                                 { label: '合同名称', value: oaRaw['doc_subject'] || oaRaw['合同名称'] || oaRaw['主题'] },
                                 { label: '合同性质', value: oaRaw['contract_nature'] || oaRaw['合同性质'] || oaRaw['合同类型'] },
@@ -1156,11 +1205,16 @@ export function ContractDetail() {
                                 { label: '部门经办人', value: oaRaw['handler'] || oaRaw['合同执行申请部门经办人'] || oaRaw['部门经办人'] || oaRaw['经办人'] },
                                 { label: '我方公司', value: oaRaw['company'] || oaRaw['甲方'] || contract.company },
                                 { label: '对方单位', value: oaRaw['counterparty'] || oaRaw['乙方'] || contract.counterparty },
-                                { label: '对方联系人', value: oaRaw['counterparty_contact'] || contract.counterpartyContact },
-                                { label: '对方地址', value: oaRaw['counterparty_address'] || contract.counterpartyAddress },
+                                { label: '对方联系人', value: cpInfo.contact || contract.counterpartyContact },
+                                { label: '对方地址', value: (() => {
+                                  const addr = cpInfo.address || oaRaw['counterparty_address'] || contract.counterpartyAddress || ''
+                                  if (addr) return addr
+                                  const loc = oaRaw['服务地点'] || ''
+                                  return (loc && !loc.startsWith('null')) ? loc : null
+                                })() },
+                                { label: '对方电话', value: cpInfo.phone },
                                 { label: '合同金额', value: contract.amount ? formatAmount(contract.amount, contract.currency) : (oaRaw['amount'] ? `¥${oaRaw['amount']}` : null) },
                                 { label: '合同份数', value: oaRaw['copies'] || oaRaw['合同份数'] || contract.copies },
-                                { label: '签订时间', value: contract.signedDate ? formatDate(contract.signedDate) : null },
                                 { label: '有效期', value: contract.startDate && contract.endDate ? `${formatDate(contract.startDate)} ~ ${formatDate(contract.endDate)}` : null },
                                 { label: '是否制式合同', value: oaRaw['是否为已审批定稿制式业务合同'] },
                               ].filter(item => item.value).map(item => (
@@ -1264,7 +1318,7 @@ export function ContractDetail() {
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <div>
-                    <CardTitle>附件清单 ({attachments.length})</CardTitle>
+                    <CardTitle>合同附件 ({attachments.length})</CardTitle>
                     <CardDescription>选择要预览或解析的附件</CardDescription>
                   </div>
                   <div>
@@ -1323,31 +1377,61 @@ export function ContractDetail() {
                         {att.is_primary ? (
                           <Badge variant="default" className="text-xs bg-primary">主附件</Badge>
                         ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="text-xs border-primary text-primary hover:bg-primary hover:text-white"
-                            onClick={async (e) => {
-                              e.stopPropagation()
-                              try {
-                                const token = localStorage.getItem('token')
-                                const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}/set-primary`, {
-                                  method: 'PUT',
-                                  headers: {
-                                    'Authorization': `Bearer ${token}`
+                          <>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="text-xs border-primary text-primary hover:bg-primary hover:text-white"
+                              onClick={async (e) => {
+                                e.stopPropagation()
+                                try {
+                                  const token = localStorage.getItem('token')
+                                  const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}/set-primary`, {
+                                    method: 'PUT',
+                                    headers: {
+                                      'Authorization': `Bearer ${token}`
+                                    }
+                                  })
+                                  if (response.ok) {
+                                    // 重新加载附件列表（会自动排序主附件到最上方）
+                                    loadAttachments(id!)
                                   }
-                                })
-                                if (response.ok) {
-                                  // 重新加载附件列表（会自动排序主附件到最上方）
-                                  loadAttachments(id!)
+                                } catch (error) {
+                                  console.error('设置主附件失败:', error)
                                 }
-                              } catch (error) {
-                                console.error('设置主附件失败:', error)
-                              }
-                            }}
-                          >
-                            ★ 设为主附件
-                          </Button>
+                              }}
+                            >
+                              ★ 设为主附件
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              title="删除附件"
+                              onClick={async (e) => {
+                                e.stopPropagation()
+                                if (!confirm('确定要删除这个附件吗？')) return
+                                try {
+                                  const token = localStorage.getItem('token')
+                                  const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}`, {
+                                    method: 'DELETE',
+                                    headers: { 'Authorization': `Bearer ${token}` }
+                                  })
+                                  if (response.ok) {
+                                    loadAttachments(id!)
+                                  } else {
+                                    const err = await response.json().catch(() => ({}))
+                                    alert(err.detail || '删除失败')
+                                  }
+                                } catch (error) {
+                                  console.error('删除附件失败:', error)
+                                  alert('删除失败')
+                                }
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </>
                         )}
                       </div>
                     </div>
@@ -1362,7 +1446,7 @@ export function ContractDetail() {
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
-                  <CardTitle>附件</CardTitle>
+                  <CardTitle>合同附件</CardTitle>
                   <div>
                     <input
                       ref={uploadInputRef}
@@ -1448,26 +1532,56 @@ export function ContractDetail() {
                           {att.is_primary ? (
                             <Badge variant="default" className="text-xs bg-primary">主附件</Badge>
                           ) : (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="text-xs border-primary text-primary hover:bg-primary hover:text-white"
-                              onClick={async (e) => {
-                                e.stopPropagation()
-                                try {
-                                  const token = localStorage.getItem('token')
-                                  const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}/set-primary`, {
-                                    method: 'PUT',
-                                    headers: { 'Authorization': `Bearer ${token}` }
-                                  })
-                                  if (response.ok) loadAttachments(id!)
-                                } catch (error) {
-                                  console.error('设置主附件失败:', error)
-                                }
-                              }}
-                            >
-                              ★ 设为主附件
-                            </Button>
+                            <>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-xs border-primary text-primary hover:bg-primary hover:text-white"
+                                onClick={async (e) => {
+                                  e.stopPropagation()
+                                  try {
+                                    const token = localStorage.getItem('token')
+                                    const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}/set-primary`, {
+                                      method: 'PUT',
+                                      headers: { 'Authorization': `Bearer ${token}` }
+                                    })
+                                    if (response.ok) loadAttachments(id!)
+                                  } catch (error) {
+                                    console.error('设置主附件失败:', error)
+                                  }
+                                }}
+                              >
+                                ★ 设为主附件
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                title="删除附件"
+                                onClick={async (e) => {
+                                  e.stopPropagation()
+                                  if (!confirm('确定要删除这个附件吗？')) return
+                                  try {
+                                    const token = localStorage.getItem('token')
+                                    const response = await fetch(`/api/v1/contracts/${contract?.id}/attachments/${att.id}`, {
+                                      method: 'DELETE',
+                                      headers: { 'Authorization': `Bearer ${token}` }
+                                    })
+                                    if (response.ok) {
+                                      loadAttachments(id!)
+                                    } else {
+                                      const err = await response.json().catch(() => ({}))
+                                      alert(err.detail || '删除失败')
+                                    }
+                                  } catch (error) {
+                                    console.error('删除附件失败:', error)
+                                    alert('删除失败')
+                                  }
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </>
                           )}
                         </div>
                       </div>

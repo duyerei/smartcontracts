@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from app.routers import contracts_router, agent_router, auth_router, supplements_router, payments_router, import_contracts_router, partners_router
+from app.routers import contracts_router, agent_router, auth_router, supplements_router, payments_router, import_contracts_router, partners_router, dingtalk_router
 from app.config import config
 from app.database import init_db, SessionLocal
 from app.auth import ensure_default_admin
@@ -43,6 +43,7 @@ app.include_router(payments_router, prefix="/api/v1")
 app.include_router(import_contracts_router, prefix="/api/v1")
 app.include_router(partners_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(dingtalk_router, prefix="/api/v1")
 
 
 @app.on_event("startup")

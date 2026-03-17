@@ -17,13 +17,14 @@ class PaymentParser:
             "payment_theme": self._extract_theme(text),
             "operator": self._extract_field(text, ["经办人"]),
             "department": self._extract_field(text, ["部门名称", "部门"]),
-            "payment_date": self._extract_date(text, ["申请日期"]),
+            "payment_date": self._extract_date(text, ["申请日期", "申请时间", "创建时间"]),
             "application_number": self._extract_field(text, ["申请单号"]),
             "contract_number": self._extract_field(text, ["合同编号"]),
             "project_name": self._extract_field(text, ["项目名称"]),
             "cost_center": self._extract_cost_center(text),
             "payment_reason": self._extract_payment_reason(text),
             "amount": self._extract_total_amount(text),
+            "contract_amount": self._extract_contract_amount(text),
             "counterparty": self._extract_field(text, ["收款单位", "对方单位"]),
         }
 
@@ -96,7 +97,8 @@ class PaymentParser:
     def _extract_date(self, text: str, keywords: list) -> Optional[str]:
         """提取日期字段"""
         for kw in keywords:
-            match = re.search(rf"{kw}\s*[：:]\s*(\d{{4}}[-/年]\d{{1,2}}[-/月]\d{{1,2}}[日]?)", text)
+            # 匹配带时分的格式：2025-06-23 15:42
+            match = re.search(rf"{kw}\s*[：:]\s*(\d{{4}}[-/年]\d{{1,2}}[-/月]\d{{1,2}}[日]?)(?:\s+\d{{1,2}}:\d{{2}})?", text)
             if match:
                 date_str = match.group(1).replace("年", "-").replace("月", "-").replace("日", "").replace("/", "-")
                 try:

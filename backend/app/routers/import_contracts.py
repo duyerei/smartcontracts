@@ -269,6 +269,82 @@ def _detect_primary_attachment(attachments: List[AttachmentData]) -> int:
     return best_idx
 
 
+def _parse_counterparty_from_raw(raw_data: dict, counterparty_name: str = '') -> dict:
+    """从OA原始数据的复合key中解析对方经办人、地址、电话"""
+    result = {'contact': '', 'address': '', 'phone': ''}
+    if not raw_data:
+        return result
+    for key in raw_data.keys():
+        if key.endswith('_2'):
+            continue
+        if '对方名称' in key and '对方经办人' in key and '地址' in key and '电话' in key:
+            brace_idx = key.find('{1}')
+            data_str = key[brace_idx + 3:].strip() if brace_idx >= 0 else key
+            stripped = re.sub(r'^\d+\s*', '', data_str).strip()
+            # 1. 电话在末尾
+            phone_match = re.search(r'(\d{7,13})\s*$', stripped)
+            phone = phone_match.group(1) if phone_match else ''
+            without_phone = stripped[:stripped.rfind(phone)].strip() if phone else stripped
+            # 2. 切掉公司名，剩余是"经办人+地址"
+            after_company = ''
+            if counterparty_name and counterparty_name in without_phone:
+                after_company = without_phone[without_phone.index(counterparty_name) + len(counterparty_name):].strip()
+            else:
+                co_match = re.match(r'^(.+(?:公司|集团|有限|股份|机构|中心|部门|局|院|所))\s*(.*)', without_phone)
+                if co_match:
+                    after_company = co_match.group(2).strip()
+            if not after_company:
+                result = {'contact': '', 'address': '', 'phone': phone}
+                break
+            # 3. 用已知省市名列表定位地址起点，避免误匹配姓名中的字
+            known_regions = [
+                '北京市', '上海市', '天津市', '重庆市',
+                '广东省', '广州市', '深圳市', '佛山市', '珠海市', '东莞市', '惠州市', '中山市',
+                '浙江省', '杭州市', '宁波市', '温州市',
+                '江苏省', '南京市', '苏州市', '无锡市',
+                '山东省', '济南市', '青岛市',
+                '四川省', '成都市',
+                '湖北省', '武汉市',
+                '湖南省', '长沙市',
+                '河南省', '郑州市',
+                '河北省', '石家庄市',
+                '陕西省', '西安市',
+                '甘肃省', '兰州市',
+                '云南省', '昆明市',
+                '贵州省', '贵阳市',
+                '福建省', '福州市', '厦门市',
+                '安徽省', '合肥市',
+                '江西省', '南昌市',
+                '辽宁省', '沈阳市', '大连市',
+                '吉林省', '长春市',
+                '黑龙江省', '哈尔滨市',
+                '内蒙古', '新疆', '西藏', '宁夏', '广西', '海南省',
+            ]
+            addr_idx = -1
+            for region in known_regions:
+                idx = after_company.find(region)
+                if idx >= 0 and (addr_idx < 0 or idx < addr_idx):
+                    addr_idx = idx
+            if addr_idx > 0:
+                contact = after_company[:addr_idx].strip()
+                address = after_company[addr_idx:].strip()
+            elif addr_idx == 0:
+                contact = ''
+                address = after_company.strip()
+            else:
+                # 没找到省市名，尝试路/街/道
+                addr_start2 = re.search(r'[\u4e00-\u9fa5]{1,10}(?:路|街|道|大道)', after_company)
+                if addr_start2:
+                    contact = after_company[:addr_start2.start()].strip()
+                    address = after_company[addr_start2.start():].strip()
+                else:
+                    contact = after_company
+                    address = ''
+            result = {'contact': contact, 'address': address, 'phone': phone}
+            break
+    return result
+
+
 def import_single_contract(
     contract_data: ContractImportData,
     db: Session,
@@ -311,8 +387,17 @@ def import_single_contract(
         contract.position = contract_data.position
         contract.company = contract_data.company
         contract.counterparty = contract_data.counterparty
-        contract.counterparty_contact = contract_data.counterparty_contact
-        contract.counterparty_address = contract_data.counterparty_address
+        # counterparty_contact: OA插件有时把我方申请人电话存在这个字段里
+        # 如果是纯数字，不要存为对方联系人（后面会从复合key或已有数据处理）
+        incoming_cc = contract_data.counterparty_contact or ''
+        if incoming_cc and not re.match(r'^\d{7,13}$', incoming_cc.strip()):
+            contract.counterparty_contact = incoming_cc
+        elif not existing:
+            # 新合同且 counterparty_contact 是纯数字，留空
+            contract.counterparty_contact = ''
+        # 如果是更新已有合同，保留已有的 counterparty_contact（可能已被修复过）
+        
+        contract.counterparty_address = contract_data.counterparty_address or (existing.counterparty_address if existing else None)
         contract.payment_type = contract_data.payment_type
         contract.copies = contract_data.copies
         contract.summary = contract_data.summary
@@ -327,9 +412,36 @@ def import_single_contract(
             contract.signed_date = create_date
             contract.created_at = create_date
         
-        # 保存原始数据
+        # 保存原始数据，并从复合key中解析对方联系人/地址/电话
         if contract_data.raw_data:
-            contract.raw_data = json.dumps(contract_data.raw_data, ensure_ascii=False)
+            raw = contract_data.raw_data
+            # 把申请时间存入raw_data，前端用 doc_create_time 字段显示
+            if contract_data.create_date and not raw.get('doc_create_time'):
+                raw['doc_create_time'] = contract_data.create_date
+            # 从复合key解析对方信息（覆盖导入JSON里可能不准确的字段）
+            cp_info = _parse_counterparty_from_raw(raw, contract_data.counterparty or '')
+            if cp_info['contact']:
+                contract.counterparty_contact = cp_info['contact']
+            if cp_info['address']:
+                contract.counterparty_address = cp_info['address']
+            # 如果还没有地址，尝试从 raw_data 的 服务地点 字段获取
+            if not contract.counterparty_address:
+                service_loc = raw.get('服务地点', '')
+                if service_loc and str(service_loc) not in ['null', 'None', '', 'null（合同文本中未明确提及服务地点）', 'null（合同文本中未提及）']:
+                    contract.counterparty_address = str(service_loc)
+            # 电话单独存入raw_data，前端可以读取
+            phone = cp_info['phone']
+            # 同时清理 raw_data 里的 counterparty_contact（如果是纯数字电话号码）
+            # 注意：这个字段可能是我方申请人的电话，不是对方的，所以不要存为对方电话
+            raw_cc = raw.get('counterparty_contact', '')
+            if raw_cc and re.match(r'^\d{7,13}$', str(raw_cc).strip()):
+                del raw['counterparty_contact']
+            # 只在有新电话时更新，避免覆盖已有的正确电话
+            if phone:
+                raw['_counterparty_phone'] = phone
+            elif '_counterparty_phone' not in raw:
+                raw['_counterparty_phone'] = ''
+            contract.raw_data = json.dumps(raw, ensure_ascii=False)
         
         # 保存合同
         if not existing:

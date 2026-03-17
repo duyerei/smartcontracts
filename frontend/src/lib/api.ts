@@ -403,6 +403,17 @@ export const paymentManagementApi = {
     return result
   },
 
+  delete: async (id: number) => {
+    return fetchApi<{ message: string }>(`/payments/${id}`, { method: 'DELETE' })
+  },
+
+  update: async (id: number, data: Record<string, unknown>) => {
+    return fetchApi<{ message: string }>(`/payments/management/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    })
+  },
+
   importPdf: async (file: File) => {
     const formData = new FormData()
     formData.append('file', file)

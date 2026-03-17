@@ -70,8 +70,8 @@ export default function ImportContracts() {
         },
         body: JSON.stringify({
           contracts: contracts,
-          skip_duplicates: true,
-          update_existing: false
+          skip_duplicates: false,
+          update_existing: true
         })
       });
 
