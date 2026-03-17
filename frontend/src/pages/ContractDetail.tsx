@@ -124,10 +124,18 @@ export function ContractDetail() {
         // 如果是从上传页跳转过来（autoparse=1），且合同还在解析中，自动触发SSE解析
         const searchParams = new URLSearchParams(location.search)
         if (searchParams.get('autoparse') === '1' && c.source !== 'oa_import') {
-          // 标题还是"解析中..."说明后台异步解析还没完成，等待后台完成即可
-          // 如果后台已完成（title不是解析中），直接启动SSE重新解析以获取LLM摘要
-          if (c.title !== '解析中...') {
-            setTimeout(() => startParseStream(id), 500)
+          const parsingTitles = ['解析中...', '扫描件识别中...', '识别中...']
+          // 标题还是解析中说明后台异步解析还没完成，等待后台完成即可
+          // 如果后台已完成，检查llm_done标记，避免重复触发SSE
+          if (!parsingTitles.includes(c.title)) {
+            let llmAlreadyDone = false
+            try {
+              const ed = JSON.parse((c as any).extracted_data || '{}')
+              llmAlreadyDone = !!ed.llm_done
+            } catch {}
+            if (!llmAlreadyDone) {
+              setTimeout(() => startParseStream(id), 500)
+            }
           }
         }
       }
@@ -430,7 +438,8 @@ export function ContractDetail() {
 
   // 普通合同"解析中..."轮询：后台异步解析完成后自动刷新并触发SSE
   useEffect(() => {
-    if (!contract || contract.title !== '解析中...' || contract.source === 'oa_import') return
+    const parsingTitles = ['解析中...', '扫描件识别中...', '识别中...']
+    if (!contract || !parsingTitles.includes(contract.title) || contract.source === 'oa_import') return
     if (!id) return
 
     let pollCount = 0
@@ -441,19 +450,25 @@ export function ContractDetail() {
       const result = await contractApi.get(id)
       if (result.data) {
         const c = result.data as unknown as Contract
-        if (c.title !== '解析中...' || pollCount >= maxPolls) {
+        const stillParsing = parsingTitles.includes(c.title)
+        if (!stillParsing || pollCount >= maxPolls) {
           setContract(c)
           clearInterval(interval)
-          // 后台OCR+正则解析完成，自动触发SSE LLM解析
-          if (c.title !== '解析中...' && c.title !== '解析失败') {
+          // 检查后台是否已完成LLM处理（llm_done标记），避免重复触发SSE
+          let llmAlreadyDone = false
+          try {
+            const ed = JSON.parse((c as any).extracted_data || '{}')
+            llmAlreadyDone = !!ed.llm_done
+          } catch {}
+          // 后台OCR+正则解析完成，且LLM未处理过，才触发SSE LLM解析
+          if (!stillParsing && c.title !== '解析失败' && !llmAlreadyDone) {
             startParseStream(id)
-          } else if (pollCount >= maxPolls && c.title === '解析中...') {
-            // 超时：强制更新显示，提示用户手动重新解析
+          } else if (pollCount >= maxPolls && stillParsing) {
             setContract({ ...c, title: '解析超时', summary: '自动解析超时，请点击"重新解析"按钮手动触发解析。' })
           }
         }
       }
-    }, 3000)
+    }, 1500)
 
     return () => clearInterval(interval)
   }, [contract?.title, id])

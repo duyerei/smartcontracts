@@ -18,40 +18,46 @@ router = APIRouter(prefix="/agent", tags=["AI助手"])
 def agent_health():
     return {
         "status": "ok",
+        "bailian_configured": bool(config.DASHSCOPE_API_KEY and (config.DASHSCOPE_AGENT_APP_ID or config.DASHSCOPE_APP_ID)),
+        "bailian_app_id": config.DASHSCOPE_AGENT_APP_ID or config.DASHSCOPE_APP_ID or None,
         "ark_configured": bool(config.ARK_API_KEY and config.ARK_BOT_MODEL),
         "ark_model": config.ARK_BOT_MODEL or None,
-        "appbuilder_configured": bool(config.APPBUILDER_API_TOKEN and config.APPBUILDER_APP_ID),
-        "appbuilder_app_id": config.APPBUILDER_APP_ID or None,
     }
 
 
 @router.post("/chat/stream")
 def agent_chat_stream(payload: AgentChatRequest):
-    """SSE 流式端点：优先 ARK（快速逐token），回退 AppBuilder。"""
+    """SSE 流式端点：优先百炼，回退 ARK。"""
     message = (payload.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
     def event_generator():
-        # 优先使用 ARK（火山引擎豆包，速度快）
+        # 优先使用百炼智能体（阿里云）
+        bailian_app = config.DASHSCOPE_AGENT_APP_ID or config.DASHSCOPE_APP_ID
+        if config.DASHSCOPE_API_KEY and bailian_app:
+            for chunk in agent_service.consult_with_bailian_stream(
+                message=message, session_id=payload.conversation_id
+            ):
+                yield f"data: {chunk}\n\n"
+            return
+        # 回退到 ARK（火山引擎豆包）
         if config.ARK_API_KEY and config.ARK_BOT_MODEL:
             for chunk in agent_service.consult_with_ark_stream(
                 message=message, conversation_id=payload.conversation_id
             ):
                 yield f"data: {chunk}\n\n"
             return
-        # 回退到 AppBuilder
-        for chunk in agent_service.consult_with_appbuilder_stream(
-            message=message, conversation_id=payload.conversation_id
-        ):
-            yield f"data: {chunk}\n\n"
+        # 都没配置
+        import json
+        yield f"data: {json.dumps({'event': 'error', 'error_detail': 'NO_STREAM_PROVIDER_CONFIGURED'})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post("/probe", response_model=AgentChatResponse)
 def agent_probe(payload: AgentChatRequest):
-    """联调检查：仅验证咨询链路（AppBuilder/Qianfan回退）"""
+    """联调检查：仅验证咨询链路"""
     message = (payload.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="消息不能为空")
@@ -80,7 +86,6 @@ def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
         filters = op.filters if op.filters else {}
         items = agent_service.list_contracts(db, limit=10, filters=filters)
 
-        # 生成友好描述
         filter_desc = ""
         if filters.get("status"):
             filter_desc += f"状态为「{filters['status']}」的"
@@ -98,9 +103,7 @@ def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
             )
         return AgentChatResponse(
             reply=f"为您找到 {len(items)} 份{filter_desc}合同：",
-            operation=op,
-            data=items,
-            provider="rule",
+            operation=op, data=items, provider="rule",
         )
 
     if op.action == "get_contract":
@@ -122,9 +125,7 @@ def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
         if not payload.confirm:
             return AgentChatResponse(
                 reply=f"请确认是否删除合同 {op.contract_id}《{contract.title}》。确认后再发送一次，并勾选确认。",
-                requires_confirmation=True,
-                operation=op,
-                provider="rule",
+                requires_confirmation=True, operation=op, provider="rule",
             )
 
         contract.is_deleted = True
@@ -139,22 +140,21 @@ def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
         if not contract:
             return AgentChatResponse(reply=f"未找到合同 {op.contract_id}。", operation=op, provider="rule")
 
-        # 触发后台异步重解析
         full_path = file_storage.get_file_path(contract.file_path)
         t = threading.Thread(target=_async_reparse_process, args=(contract.id, str(full_path)))
         t.daemon = True
         t.start()
         return AgentChatResponse(reply=f"已开始后台重新解析合同 {op.contract_id}，请稍后查看结果。", operation=op, provider="rule")
 
-    # consult：如果 ARK 已配置，快速返回标记让前端走流式，不调用慢的 AppBuilder
-    if config.ARK_API_KEY and config.ARK_BOT_MODEL:
-        return AgentChatResponse(
-            reply="",
-            operation=op,
-            provider="ark",
-        )
+    # consult：优先百炼流式，回退ARK流式
+    bailian_app = config.DASHSCOPE_AGENT_APP_ID or config.DASHSCOPE_APP_ID
+    if config.DASHSCOPE_API_KEY and bailian_app:
+        return AgentChatResponse(reply="", operation=op, provider="bailian")
 
-    # ARK 未配置时回退到 AppBuilder
+    if config.ARK_API_KEY and config.ARK_BOT_MODEL:
+        return AgentChatResponse(reply="", operation=op, provider="ark")
+
+    # 都没配置时回退到非流式
     result = agent_service.consult(message=message, conversation_id=payload.conversation_id)
     return AgentChatResponse(
         reply=result.get("reply", ""),

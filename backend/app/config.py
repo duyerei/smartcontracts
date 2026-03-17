@@ -32,6 +32,13 @@ class Config:
     ARK_API_KEY = os.getenv("ARK_API_KEY", "")
     ARK_BOT_MODEL = os.getenv("ARK_BOT_MODEL", "")
     ARK_API_URL = os.getenv("ARK_API_URL", "https://ark.cn-beijing.volces.com/api/v3/bots/chat/completions")
+    # 阿里云百炼（DashScope）
+    DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
+    DASHSCOPE_APP_ID = os.getenv("DASHSCOPE_APP_ID", "")
+    # 百炼合同解析智能体（用于合同解析，替代千帆）
+    DASHSCOPE_CONTRACT_APP_ID = os.getenv("DASHSCOPE_CONTRACT_APP_ID", "")
+    # 百炼AI助手智能体（用于聊天助手，替代AppBuilder）
+    DASHSCOPE_AGENT_APP_ID = os.getenv("DASHSCOPE_AGENT_APP_ID", "")
     # JWT认证
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
     JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")

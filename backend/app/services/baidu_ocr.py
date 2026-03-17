@@ -150,8 +150,94 @@ class BaiduOCR:
         except Exception as e:
             return f"PDF识别异常: {str(e)}"
     
+    def recognize_pdf_with_qwen_vl(self, pdf_path: str, num_pages: int = 10) -> str:
+        """使用通义千问视觉模型（qwen-vl）识别PDF页面图片，完全替代百度OCR"""
+        api_key = config.DASHSCOPE_API_KEY
+        if not api_key:
+            return ""
+
+        try:
+            import fitz
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            pages_to_read = min(num_pages, total_pages)
+
+            # 预渲染所有页面为base64（在主线程完成，fitz不是线程安全的）
+            page_images = []
+            for i in range(pages_to_read):
+                page = doc[i]
+                mat = fitz.Matrix(1.5, 1.5)  # 1.5倍缩放，平衡质量和速度
+                pix = page.get_pixmap(matrix=mat)
+                img_base64 = base64.b64encode(pix.tobytes("png")).decode()
+                page_images.append((i, img_base64))
+            doc.close()
+
+            url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+
+            def recognize_page(idx_b64):
+                i, img_base64 = idx_b64
+                payload = {
+                    "model": "qwen-vl-plus",
+                    "input": {
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"image": f"data:image/png;base64,{img_base64}"},
+                                {"text": "请完整提取这张合同图片中的所有文字内容，保持原有格式和段落结构，不要遗漏任何文字。"}
+                            ]
+                        }]
+                    }
+                }
+                try:
+                    resp = requests.post(url, json=payload, headers=headers, timeout=60)
+                    result = resp.json()
+                    if resp.status_code == 200:
+                        choices = result.get("output", {}).get("choices", [])
+                        if choices:
+                            content = choices[0].get("message", {}).get("content", "")
+                            if isinstance(content, list):
+                                text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+                            else:
+                                text = str(content)
+                            if text.strip():
+                                print(f"通义千问VL识别第{i+1}页成功，文字长度: {len(text)}")
+                                return (i, text)
+                    else:
+                        print(f"通义千问VL第{i+1}页识别失败: {result.get('message', result)}")
+                except Exception as e:
+                    print(f"通义千问VL第{i+1}页请求异常: {e}")
+                return (i, None)
+
+            # 并发识别，最多3个并发（避免触发限流）
+            results = {}
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {executor.submit(recognize_page, item): item[0] for item in page_images}
+                for future in as_completed(futures):
+                    i, text = future.result()
+                    if text:
+                        results[i] = text
+
+            if not results:
+                return ""
+
+            all_text = [f"--- 第{i+1}页 ---\n{results[i]}" for i in sorted(results.keys())]
+            summary = f"[已读取 {len(all_text)}/{total_pages} 页]\n\n"
+            return summary + "\n\n".join(all_text)
+
+        except ImportError:
+            return ""
+        except Exception as e:
+            print(f"通义千问VL识别异常: {e}")
+            return ""
+
     def recognize_pdf(self, pdf_path: str, num_pages: int = None) -> str:
-        """智能选择PDF解析方式：优先使用PyMuPDF提取文字和图片
+        """智能选择PDF解析方式：优先使用通义千问VL，回退到fitz文字提取和百度OCR
         
         Args:
             pdf_path: PDF文件路径
@@ -176,20 +262,56 @@ class BaiduOCR:
             
             has_text = False
             has_images = False
+            sample_text = ""
             for i in range(min(num_pages, total_pages)):
                 page = doc[i]
                 text = page.get_text()
                 if text and len(text.strip()) > 10:
                     has_text = True
+                    sample_text += text
                 images = page.get_images()
                 if images:
                     has_images = True
-            
+
             doc.close()
-            
+
+            # 策略：
+            # 1. 有效文字PDF → 直接fitz提取（最快）
+            # 2. 水印/扫描件PDF → 通义千问VL并发识别（慢但准）
+            # 3. 无百炼配置时 → 百度OCR回退
+
             if has_text:
-                return self._extract_text_with_fitz_smart(pdf_path, total_pages, num_pages)
-            elif has_images:
+                contract_keywords = ["甲方", "乙方", "合同", "协议", "条款", "第一条", "第二条",
+                                     "服务", "付款", "金额", "签订", "履行", "违约", "保密",
+                                     "甲 方", "乙 方", "合 同"]  # 兼容字符间有空格的情况
+                has_contract_content = any(kw in sample_text for kw in contract_keywords)
+                if len(sample_text) > 0:
+                    unique_chars = len(set(sample_text.replace('\n', '').replace(' ', '')))
+                    total_chars = len(sample_text.replace('\n', '').replace(' ', ''))
+                    repetition_ratio = unique_chars / total_chars if total_chars > 0 else 1
+                else:
+                    repetition_ratio = 1
+                # 文字足够多（>300字）也认为是有效PDF，避免误判
+                enough_text = total_chars > 300 if len(sample_text) > 0 else False
+                is_watermark_only = not (has_contract_content or enough_text) or repetition_ratio < 0.08
+                print(f"PDF文字检测: has_contract={has_contract_content}, repetition_ratio={repetition_ratio:.3f}, enough={enough_text}, is_watermark={is_watermark_only}")
+
+                if not is_watermark_only:
+                    # 有效文字PDF，直接fitz提取，最快
+                    print("有效文字PDF，使用fitz直接提取")
+                    return self._extract_text_with_fitz_smart(pdf_path, total_pages, num_pages)
+
+            # 水印PDF或扫描件：优先通义千问VL并发识别
+            if config.DASHSCOPE_API_KEY:
+                print("水印/扫描件PDF，使用通义千问VL并发识别...")
+                qwen_result = self.recognize_pdf_with_qwen_vl(pdf_path, num_pages)
+                if qwen_result and len(qwen_result) > 100:
+                    print(f"通义千问VL识别成功，文字长度: {len(qwen_result)}")
+                    return qwen_result
+                print("通义千问VL识别结果为空，回退到百度OCR")
+
+            # 最终回退：百度OCR
+            if has_images or has_text:
                 return self.recognize_pdf_with_fitz_smart(pdf_path, total_pages, num_pages)
             else:
                 return "PDF解析失败: 无法识别PDF内容"

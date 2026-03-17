@@ -137,6 +137,22 @@ class PaymentParser:
             return reason if reason else None
         return None
 
+    def _extract_contract_amount(self, text: str) -> Optional[float]:
+        """提取合同金额"""
+        patterns = [
+            r"合同金额\s*[：:]\s*([\d,]+\.?\d*)",
+            r"合同总金额\s*[：:]\s*([\d,]+\.?\d*)",
+            r"合同价款\s*[：:]\s*([\d,]+\.?\d*)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    return float(match.group(1).replace(",", ""))
+                except Exception:
+                    pass
+        return None
+
     def _extract_total_amount(self, text: str) -> Optional[float]:
         """提取合计金额"""
         # 优先匹配"合计分摊金额"或"合计"行

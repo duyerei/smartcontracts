@@ -65,16 +65,15 @@ async def import_payment_pdf(
 
         # 保存PDF文件到正式存储（payments子目录）
         import uuid
-        from pathlib import Path
+        from app.config import config as _cfg
         file_id = str(uuid.uuid4())
-        payments_dir = Path("/app/storage/payments")
+        payments_dir = _cfg.STORAGE_PATH / "payments"
         payments_dir.mkdir(parents=True, exist_ok=True)
         dest_path = payments_dir / f"{file_id}.pdf"
         with open(dest_path, "wb") as f_out:
             f_out.write(content)
         file_path = str(dest_path)
         file_size = len(content)
-
         # 解析付款日期
         payment_date = None
         if data.get("payment_date"):

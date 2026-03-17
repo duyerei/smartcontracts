@@ -10,7 +10,7 @@ interface ChatMessage {
   operation?: AgentOperation
   data?: Record<string, unknown>[]
   requires_confirmation?: boolean
-  provider?: 'ark' | 'appbuilder' | 'qianfan' | 'rule'
+  provider?: 'ark' | 'appbuilder' | 'qianfan' | 'bailian' | 'bailian_llm' | 'rule'
   conversationId?: string
   errorDetail?: string
 }
@@ -89,7 +89,7 @@ export function AgentChatWidget() {
             if (last && last.role === 'assistant') {
               updated[updated.length - 1] = {
                 ...last,
-                provider: provider as 'ark' | 'appbuilder' | 'qianfan' | 'rule',
+                provider: provider as 'ark' | 'appbuilder' | 'qianfan' | 'bailian' | 'bailian_llm' | 'rule',
                 conversationId: cid,
               }
             }

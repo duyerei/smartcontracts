@@ -517,7 +517,12 @@ def get_contract(
     }
 
 def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
-    """后台线程：完整的 OCR提取 + 正则解析 + LLM增强"""
+    """后台线程：完整的 OCR提取 + 正则解析 + LLM增强
+    
+    分两阶段执行：
+    阶段1（极快 <1s）：fitz直接提取文字 + 正则解析 → 立即commit，前端立即看到title
+    阶段2（慢）：如果是水印/扫描件，用VL重新识别 → 更新raw_text + LLM增强
+    """
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -527,11 +532,74 @@ def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
 
         print(f"[异步解析] 开始解析合同 {contract_id}, 文件: {file_path}")
 
-        # 第1步：OCR + 正则解析
-        parse_result = contract_parser.parse_contract(file_path, metadata_hint)
-        extracted = parse_result["data"]
-        raw_text = parse_result.get("raw_text", "")
-        note = parse_result.get("note", "")
+        # ── 阶段1：fitz快速提取（不调用任何API，极快）──────────────────────
+        fast_text = ""
+        needs_vl = False
+        try:
+            import fitz as _fitz
+            _doc = _fitz.open(file_path)
+            _total = len(_doc)
+            _parts = []
+            for _i in range(min(_total, 20)):
+                _t = _doc[_i].get_text()
+                if _t and _t.strip():
+                    _parts.append(f"--- 第{_i+1}页 ---\n{_t}")
+            _doc.close()
+            fast_text = "\n\n".join(_parts)
+
+            # 判断是否需要VL识别（水印/扫描件）
+            if fast_text:
+                _kws = ["甲方", "乙方", "合同", "协议", "条款", "第一条", "服务", "付款",
+                        "甲 方", "乙 方", "合 同", "协 议"]  # 兼容fitz提取时字符间有空格的情况
+                _has_content = any(kw in fast_text for kw in _kws)
+                _s = fast_text.replace('\n','').replace(' ','')
+                _ratio = len(set(_s)) / len(_s) if _s else 1
+                # 只要文字足够多（>300字）且字符多样性合理，就认为是有效文字PDF
+                _enough_text = len(_s) > 300
+                needs_vl = not (_has_content or _enough_text) or (_ratio < 0.08)
+                print(f"[阶段1] fitz提取 {len(fast_text)} 字, has_content={_has_content}, ratio={_ratio:.3f}, enough={_enough_text}, needs_vl={needs_vl}")
+            else:
+                needs_vl = True  # 纯图片PDF
+                print(f"[阶段1] fitz无文字，需要VL识别")
+        except Exception as _e:
+            print(f"[阶段1] fitz提取失败: {_e}")
+            needs_vl = True
+
+        # 用快速文字做正则解析（立即更新title）
+        from app.services.contract_parser import ContractParser as _CP
+        _parser = _CP.__new__(_CP)
+        combined_fast = fast_text + "\n\n" + metadata_hint if metadata_hint else fast_text
+
+        if fast_text and not needs_vl:
+            # 有效文字PDF，直接用fitz文字做正则解析
+            extracted = {
+                "contract_number": _parser._extract_contract_number(combined_fast),
+                "title": _parser._extract_title(combined_fast),
+                "parties": _parser._extract_parties(combined_fast),
+                "amount": _parser._extract_amount(combined_fast),
+                "contract_type": _parser._classify_contract(combined_fast),
+                "department": _parser._extract_department(combined_fast),
+                "signed_date": _parser._extract_date(combined_fast, "signed"),
+                "start_date": _parser._extract_date(combined_fast, "start"),
+                "end_date": _parser._extract_date(combined_fast, "end"),
+            }
+            raw_text = fast_text
+            note = ""
+        else:
+            # 水印/扫描件：阶段1先用水印文字做基础解析（title可能是水印，但至少不是"解析中..."）
+            extracted = {
+                "contract_number": f"CT-{datetime.now().strftime('%Y%m%d')}-{datetime.now().strftime('%H%M%S')}",
+                "title": "扫描件识别中...",
+                "parties": [],
+                "amount": None,
+                "contract_type": "其他",
+                "department": "其他",
+                "signed_date": None,
+                "start_date": None,
+                "end_date": None,
+            }
+            raw_text = fast_text
+            note = ""
 
         # 更新基础字段
         # 合同编号去重：如果提取到的编号已被其他合同占用，加后缀避免唯一约束冲突
@@ -576,7 +644,51 @@ def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
 
         contract.updated_at = datetime.now()
         db.commit()
-        print(f"[异步解析] 合同 {contract_id} OCR+正则解析完成, title={contract.title}, text_len={len(raw_text)}")
+        print(f"[异步解析] 合同 {contract_id} 阶段1完成, title={contract.title}, text_len={len(raw_text)}")
+
+        # ── 阶段2：水印/扫描件PDF → VL重新识别 ──────────────────────────────
+        if needs_vl:
+            print(f"[异步解析] 合同 {contract_id} 开始VL识别...")
+            try:
+                from app.services.baidu_ocr import baidu_ocr as _ocr
+                vl_text = _ocr.recognize_pdf_with_qwen_vl(file_path)
+                if vl_text and len(vl_text) > 100:
+                    raw_text = vl_text
+                    combined_vl = vl_text + "\n\n" + metadata_hint if metadata_hint else vl_text
+                    vl_extracted = {
+                        "contract_number": _parser._extract_contract_number(combined_vl),
+                        "title": _parser._extract_title(combined_vl),
+                        "parties": _parser._extract_parties(combined_vl),
+                        "amount": _parser._extract_amount(combined_vl),
+                        "contract_type": _parser._classify_contract(combined_vl),
+                        "department": _parser._extract_department(combined_vl),
+                        "signed_date": _parser._extract_date(combined_vl, "signed"),
+                        "start_date": _parser._extract_date(combined_vl, "start"),
+                        "end_date": _parser._extract_date(combined_vl, "end"),
+                    }
+                    contract.raw_text = raw_text
+                    contract.extracted_data = json.dumps(vl_extracted, ensure_ascii=False)
+                    if vl_extracted.get("title") and vl_extracted["title"] not in ("未识别合同标题", ""):
+                        contract.title = vl_extracted["title"]
+                    if vl_extracted.get("parties"):
+                        contract.parties = json.dumps(vl_extracted["parties"], ensure_ascii=False)
+                    if vl_extracted.get("amount"):
+                        contract.amount = vl_extracted["amount"]
+                    for _df, _dk in [("signed_date","signed_date"),("start_date","start_date"),("end_date","end_date")]:
+                        if vl_extracted.get(_dk):
+                            try:
+                                setattr(contract, _df, datetime.strptime(vl_extracted[_dk], "%Y-%m-%d"))
+                            except Exception:
+                                pass
+                    contract.summary = _generate_contract_summary(vl_extracted, raw_text)
+                    contract.updated_at = datetime.now()
+                    db.commit()
+                    print(f"[异步解析] 合同 {contract_id} VL识别完成, title={contract.title}")
+                    note = ""
+                else:
+                    print(f"[异步解析] VL识别结果为空，保持阶段1结果")
+            except Exception as _vl_e:
+                print(f"[异步解析] VL识别失败: {_vl_e}")
 
         # 第2步：LLM增强（如果有文本且非OCR失败）
         if raw_text and not note:
@@ -676,6 +788,14 @@ def _async_llm_process_with_db(db, contract, raw_text: str):
             contract.summary = llm_summary
     except Exception as e:
         print(f"[异步] LLM摘要提取失败: {e}")
+
+    # 标记LLM已完成，前端轮询检测到后不再重复触发SSE解析
+    try:
+        existing_data = json.loads(contract.extracted_data) if contract.extracted_data else {}
+        existing_data["llm_done"] = True
+        contract.extracted_data = json.dumps(existing_data, ensure_ascii=False)
+    except Exception:
+        contract.extracted_data = json.dumps({"llm_done": True}, ensure_ascii=False)
 
     contract.updated_at = datetime.now()
     db.commit()

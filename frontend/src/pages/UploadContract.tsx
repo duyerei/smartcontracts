@@ -56,16 +56,39 @@ function ContractUploadTab() {
       const result = await contractApi.upload(uploadFile.file)
       const data = result.data || result
       const contractId = data.contract_id
-      setFiles(p => p.map(f => f.id === uploadFile.id ? {
-        ...f, status: 'completed' as const, progress: 100, contractId,
-        extractedData: {
-          contractNumber: data.contract_number || '',
-          title: data.extracted_data?.title || uploadFile.file.name.replace('.pdf', ''),
-          amount: data.extracted_data?.amount || 0,
-          type: data.extracted_data?.contract_type || '服务合同',
+
+      // 上传成功后，轮询等待后台完成第一次解析（title不再是"解析中..."），再跳转
+      // 最多等10秒，超时直接跳转
+      if (contractId) {
+        const parsingTitles = ['解析中...', '扫描件识别中...', '识别中...']
+        let waited = 0
+        const maxWait = 10000
+        const pollInterval = 800
+
+        const waitAndNavigate = async () => {
+          while (waited < maxWait) {
+            await new Promise(r => setTimeout(r, pollInterval))
+            waited += pollInterval
+            try {
+              const check = await contractApi.get(contractId)
+              if (check.data && !parsingTitles.includes((check.data as any).title)) {
+                break  // 后台已完成第一次解析
+              }
+            } catch {}
+          }
+          setFiles(p => p.map(f => f.id === uploadFile.id ? {
+            ...f, status: 'completed' as const, progress: 100, contractId,
+            extractedData: {
+              contractNumber: data.contract_number || '',
+              title: data.extracted_data?.title || uploadFile.file.name.replace('.pdf', ''),
+              amount: data.extracted_data?.amount || 0,
+              type: data.extracted_data?.contract_type || '服务合同',
+            }
+          } : f))
+          navigate(`/contracts/${contractId}`)
         }
-      } : f))
-      if (contractId) setTimeout(() => navigate(`/contracts/${contractId}?autoparse=1`), 800)
+        waitAndNavigate()
+      }
     } catch (error) {
       setFiles(p => p.map(f => f.id === uploadFile.id ? {
         ...f, status: 'error' as const, error: error instanceof Error ? error.message : '上传失败'
