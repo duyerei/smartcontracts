@@ -490,3 +490,112 @@ export const partnerApi = {
   deleteAttachment: async (partnerId: number, attId: number) =>
     fetchApi<{ message: string }>(`/partners/${partnerId}/attachments/${attId}`, { method: 'DELETE' }),
 }
+
+export interface OrgNode {
+  id: number
+  code: string
+  name: string
+  parent_id: number | null
+  path: string
+  level: number
+  org_type: string
+  manager_user_id?: number | null
+  status: string
+  sort: number
+  created_at?: string | null
+  updated_at?: string | null
+  children?: OrgNode[]
+}
+
+export interface PermissionItem {
+  id: number
+  code: string
+  name: string
+  module: string
+  action: string
+  resource_type: string
+}
+
+export interface RolePermissionItem {
+  code: string
+  name: string
+}
+
+export interface RoleDataScopeItem {
+  resource_type: string
+  scope_type: string
+  org_ids: number[]
+}
+
+export interface RoleRecord {
+  id: number
+  code: string
+  name: string
+  description?: string | null
+  status: string
+  is_system: boolean
+  permissions: RolePermissionItem[]
+  data_scopes: RoleDataScopeItem[]
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface AdminUserRecord {
+  id: number
+  username: string
+  real_name: string
+  department: string
+  role: 'admin' | 'user'
+  primary_org_id?: number | null
+  primary_org_name?: string | null
+  employee_no?: string | null
+  position_name?: string | null
+  role_ids: number[]
+  roles: Array<{ id: number; code: string; name: string }>
+  permissions: string[]
+  data_scopes: Record<string, { scope_type?: string | null; scope_types?: string[]; org_ids?: number[] }>
+  is_active: boolean
+  created_at?: string | null
+}
+
+export const authAdminApi = {
+  listUsers: async () => fetchApi<AdminUserRecord[]>('/auth/users'),
+  createUser: async (data: Record<string, unknown>) =>
+    fetchApi<AdminUserRecord>('/auth/users', { method: 'POST', body: JSON.stringify(data) }),
+  updateUser: async (id: number, data: Record<string, unknown>) =>
+    fetchApi<AdminUserRecord>(`/auth/users/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteUser: async (id: number) =>
+    fetchApi<{ message: string }>(`/auth/users/${id}`, { method: 'DELETE' }),
+}
+
+export const orgApi = {
+  list: async () => fetchApi<{ items: OrgNode[] }>('/orgs'),
+  getTree: async () => fetchApi<{ items: OrgNode[] }>('/orgs/tree'),
+  create: async (data: Record<string, unknown>) =>
+    fetchApi<OrgNode>('/orgs', { method: 'POST', body: JSON.stringify(data) }),
+  update: async (id: number, data: Record<string, unknown>) =>
+    fetchApi<OrgNode>(`/orgs/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: async (id: number) =>
+    fetchApi<{ message: string }>(`/orgs/${id}`, { method: 'DELETE' }),
+}
+
+export const roleApi = {
+  list: async () => fetchApi<{ items: RoleRecord[] }>('/roles'),
+  listPermissions: async () => fetchApi<{ items: PermissionItem[] }>('/roles/permissions'),
+  create: async (data: Record<string, unknown>) =>
+    fetchApi<RoleRecord>('/roles', { method: 'POST', body: JSON.stringify(data) }),
+  update: async (id: number, data: Record<string, unknown>) =>
+    fetchApi<RoleRecord>(`/roles/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: async (id: number) =>
+    fetchApi<{ message: string }>(`/roles/${id}`, { method: 'DELETE' }),
+  updatePermissions: async (id: number, permissionCodes: string[]) =>
+    fetchApi<RoleRecord>(`/roles/${id}/permissions`, {
+      method: 'PUT',
+      body: JSON.stringify({ permission_codes: permissionCodes }),
+    }),
+  updateDataScopes: async (id: number, scopes: RoleDataScopeItem[]) =>
+    fetchApi<RoleRecord>(`/roles/${id}/data-scopes`, {
+      method: 'PUT',
+      body: JSON.stringify({ scopes }),
+    }),
+}

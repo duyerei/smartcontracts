@@ -11,7 +11,10 @@ import codecs
 import re
 
 from app.database import get_db, Contract, ContractAttachment, User, SessionLocal
-from app.auth import get_current_user, verify_token
+from app.auth import verify_token
+from app.security.bootstrap import find_org_by_name, sync_contract_department_with_org
+from app.security.permissions import ensure_entity_access, populate_ownership_fields, require_permission
+from app.security.principal import Principal, build_principal
 
 router = APIRouter(prefix="/contracts", tags=["合同导入"])
 
@@ -347,6 +350,7 @@ def _parse_counterparty_from_raw(raw_data: dict, counterparty_name: str = '') ->
 
 def import_single_contract(
     contract_data: ContractImportData,
+    principal: Principal,
     db: Session,
     skip_duplicates: bool = True,
     update_existing: bool = False
@@ -369,6 +373,7 @@ def import_single_contract(
         elif update_existing:
             # 更新现有合同
             contract = existing
+            ensure_entity_access(contract, principal, "contract", db)
         else:
             return False, f"合同已存在: {contract_data.contract_number}", None
     else:
@@ -402,7 +407,8 @@ def import_single_contract(
         contract.copies = contract_data.copies
         contract.summary = contract_data.summary
         contract.source = "oa_import"
-        
+        contract.updated_at = datetime.now()
+
         # 解析金额
         contract.amount = parse_amount(contract_data.amount) if contract_data.amount else None
         
@@ -442,7 +448,17 @@ def import_single_contract(
             elif '_counterparty_phone' not in raw:
                 raw['_counterparty_phone'] = ''
             contract.raw_data = json.dumps(raw, ensure_ascii=False)
-        
+
+        fallback_department = contract.department or (principal.primary_org.name if principal.primary_org else "其他")
+        populate_ownership_fields(contract, principal, fallback_department=fallback_department)
+        sync_contract_department_with_org(
+            db,
+            contract,
+            preferred_org_id=None if contract.department else (principal.primary_org.id if principal.primary_org else None),
+            preferred_department=fallback_department,
+            create_missing_org=False,
+        )
+
         # 保存合同
         if not existing:
             db.add(contract)
@@ -485,7 +501,7 @@ def import_single_contract(
 @router.post("/import", response_model=ImportResponse)
 async def import_contracts(
     request: ImportRequest = Body(...),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.import_oa")),
     db: Session = Depends(get_db)
 ):
     """
@@ -506,6 +522,7 @@ async def import_contracts(
     for contract_data in request.contracts:
         success, error_msg, contract = import_single_contract(
             contract_data,
+            principal,
             db,
             request.skip_duplicates,
             request.update_existing
@@ -545,7 +562,7 @@ async def import_contracts(
 @router.get("/{contract_id}/attachments")
 async def get_contract_attachments(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     """获取合同的所有附件"""
@@ -558,6 +575,7 @@ async def get_contract_attachments(
     
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     # 查询附件
     attachments = db.query(ContractAttachment).filter(
@@ -605,15 +623,19 @@ async def download_attachment(
         current_user = verify_token(token, db)
     if current_user is None:
         raise HTTPException(status_code=401, detail="未授权")
-    
+    principal = build_principal(db, current_user)
+    if not principal.has_permission("contract.download"):
+        raise HTTPException(status_code=403, detail="缺少权限: contract.download")
+
     # 验证合同是否存在
     contract = db.query(Contract).filter(
         Contract.id == contract_id,
         Contract.is_deleted == False
     ).first()
-    
+
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     # 查询附件
     attachment = db.query(ContractAttachment).filter(
@@ -690,7 +712,7 @@ async def download_attachment(
 async def preview_attachment_as_pdf(
     contract_id: int,
     attachment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     """将 .doc 附件转换为 PDF 后返回，用于浏览器内嵌预览"""
@@ -703,6 +725,7 @@ async def preview_attachment_as_pdf(
     ).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     attachment = db.query(ContractAttachment).filter(
         ContractAttachment.id == attachment_id,
@@ -758,7 +781,7 @@ async def preview_attachment_as_pdf(
 async def analyze_attachment(
     contract_id: int,
     attachment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.reparse")),
     db: Session = Depends(get_db)
 ):
     """分析OA导入合同的附件，提取合同信息并进行LLM解析"""
@@ -774,6 +797,7 @@ async def analyze_attachment(
     
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     # 查询附件
     attachment = db.query(ContractAttachment).filter(
@@ -943,7 +967,7 @@ async def analyze_attachment(
 async def set_primary_attachment(
     contract_id: int,
     attachment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.edit")),
     db: Session = Depends(get_db)
 ):
     """设置主附件（默认解析的附件）"""
@@ -956,6 +980,7 @@ async def set_primary_attachment(
     
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     # 验证附件是否存在
     attachment = db.query(ContractAttachment).filter(

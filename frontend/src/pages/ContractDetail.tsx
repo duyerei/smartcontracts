@@ -37,9 +37,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { contractApi, paymentManagementApi } from '@/lib/api'
 import type { Contract } from '@/types'
+import { useAuth } from '@/contexts/AuthContext'
 
 export function ContractDetail() {
   const { id } = useParams()
+  const { hasPermission } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const [contract, setContract] = useState<Contract | null>(null)
@@ -89,18 +91,12 @@ export function ContractDetail() {
     startDate: '',
     endDate: ''
   })
-
-  // 判断summary是否为LLM生成（含Markdown格式标记或长度较长）
-  const isLlmSummary = (summary?: string) => {
-    if (!summary) return false
-    // 检查是否包含Markdown格式标记
-    if (/^#{1,3}\s|\*\*|^>\s|^-\s.*：/m.test(summary)) return true
-    // 检查是否包含"主要合作内容"、"付款方式"等关键词（LLM生成的摘要通常包含这些）
-    if (/主要合作内容|付款方式|服务内容|产品.*明细|价格明细/.test(summary)) return true
-    // 如果摘要很长（超过500字符），也认为是LLM生成的
-    if (summary.length > 500) return true
-    return false
-  }
+  const canEditContract = hasPermission('contract.edit')
+  const canDeleteContract = hasPermission('contract.delete')
+  const canDownloadContract = hasPermission('contract.download')
+  const canReparseContract = hasPermission('contract.reparse')
+  const canViewSupplements = hasPermission('supplement.view')
+  const canViewPayments = hasPermission('payment.view')
 
   useEffect(() => {
     // 切换合同时清空附件缓存
@@ -114,7 +110,7 @@ export function ContractDetail() {
         setContract(c)
         
         // 只有非OA导入的合同才加载主文件预览
-        if (c.source !== 'oa_import') {
+        if (c.source !== 'oa_import' && canDownloadContract) {
           loadPreviewUrl(id, c.filePath)
         }
         
@@ -142,7 +138,7 @@ export function ContractDetail() {
       setLoading(false)
     }
     loadContract()
-  }, [id])
+  }, [id, location.search, canDownloadContract])
 
   // 加载合同类型列表（编辑时用）
   useEffect(() => {
@@ -210,11 +206,11 @@ export function ContractDetail() {
 
   // 当选中附件且contract已加载时，自动触发预览
   useEffect(() => {
-    if (selectedAttachment && contract?.id && !autoPreviewTriggered.current) {
+    if (selectedAttachment && contract?.id && canDownloadContract && !autoPreviewTriggered.current) {
       autoPreviewTriggered.current = true
       handleAttachmentPreview(selectedAttachment)
     }
-  }, [selectedAttachment, contract?.id])
+  }, [selectedAttachment, contract?.id, canDownloadContract])
 
   // 加载预览URL
   const loadPreviewUrl = async (contractId: string, filePath?: string) => {
@@ -511,6 +507,8 @@ export function ContractDetail() {
         const updated = result.data as unknown as Contract
         setContract(updated)
         setIsEditing(false)
+      } else if (result.error) {
+        alert(`保存失败: ${result.error}`)
       }
     } catch (error) {
       console.error('保存失败:', error)
@@ -882,14 +880,18 @@ export function ContractDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={handleDownload}>
-            <Download className="h-4 w-4 mr-2" />
-            下载
-          </Button>
-          <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>
-            <Trash2 className="h-4 w-4 mr-2" />
-            {isDeleting ? '删除中...' : '删除'}
-          </Button>
+          {canDownloadContract && (
+            <Button variant="outline" onClick={handleDownload}>
+              <Download className="h-4 w-4 mr-2" />
+              下载
+            </Button>
+          )}
+          {canDeleteContract && (
+            <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>
+              <Trash2 className="h-4 w-4 mr-2" />
+              {isDeleting ? '删除中...' : '删除'}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -926,16 +928,18 @@ export function ContractDetail() {
           >
             操作记录
           </button>
-          <button
-            onClick={() => { setActiveTab('payments'); fetchContractPayments(); }}
-            className={`pb-3 px-1 border-b-2 transition-colors ${
-              activeTab === 'payments'
-                ? 'border-primary text-primary font-medium'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            付款记录
-          </button>
+          {canViewPayments && (
+            <button
+              onClick={() => { setActiveTab('payments'); fetchContractPayments(); }}
+              className={`pb-3 px-1 border-b-2 transition-colors ${
+                activeTab === 'payments'
+                  ? 'border-primary text-primary font-medium'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              付款记录
+            </button>
+          )}
         </div>
       </div>
 
@@ -945,10 +949,12 @@ export function ContractDetail() {
               <Card className={`ai-analyzing-card ${isLlmParsing || isReparsing ? "is-loading" : ""}`}>
                 <CardHeader className="flex flex-row items-center justify-between">
                   <CardTitle>基本信息</CardTitle>
-                  <Button variant="outline" size="sm" onClick={handleEdit}>
-                    <Edit className="h-4 w-4 mr-2" />
-                    编辑
-                  </Button>
+                  {canEditContract && (
+                    <Button variant="outline" size="sm" onClick={handleEdit}>
+                      <Edit className="h-4 w-4 mr-2" />
+                      编辑
+                    </Button>
+                  )}
                 </CardHeader>
                 <CardContent className="space-y-6">
                   <div className="grid grid-cols-2 gap-6">
@@ -1032,6 +1038,7 @@ export function ContractDetail() {
                           <span>AI正在智能解析中...</span>
                         </div>
                       ) : contract.source === 'oa_import' ? (
+                        canReparseContract ? (
                         <Button
                           variant="outline"
                           size="sm"
@@ -1042,11 +1049,14 @@ export function ContractDetail() {
                           <Sparkles className="h-3 w-3 mr-1" />
                           合同解析
                         </Button>
+                        ) : null
                       ) : (
-                        <Button variant="outline" size="sm" onClick={handleReparse}>
-                          <Sparkles className="h-3 w-3 mr-1" />
-                          重新解析
-                        </Button>
+                        canReparseContract ? (
+                          <Button variant="outline" size="sm" onClick={handleReparse}>
+                            <Sparkles className="h-3 w-3 mr-1" />
+                            重新解析
+                          </Button>
+                        ) : null
                       )}
                     </div>
                     <div className="bg-muted rounded-lg p-4 max-h-[30vh] overflow-auto">
@@ -1121,15 +1131,17 @@ export function ContractDetail() {
 
               {/* OA流程信息（所有合同都显示） */}
               <Card>
-                  <CardHeader className="flex flex-row items-center justify-between">
-                    <div>
-                      <CardTitle>OA流程信息</CardTitle>
-                      <CardDescription>从OA系统导入的流程信息</CardDescription>
-                    </div>
-                    <Button variant="outline" size="sm" onClick={() => setShowPaymentPdfImport(true)}>
-                      <Upload className="h-4 w-4 mr-2" />
-                      导入流程表单PDF
-                    </Button>
+                <CardHeader className="flex flex-row items-center justify-between">
+                  <div>
+                    <CardTitle>OA流程信息</CardTitle>
+                    <CardDescription>从OA系统导入的流程信息</CardDescription>
+                  </div>
+                    {canEditContract && (
+                      <Button variant="outline" size="sm" onClick={() => setShowPaymentPdfImport(true)}>
+                        <Upload className="h-4 w-4 mr-2" />
+                        导入流程表单PDF
+                      </Button>
+                    )}
                   </CardHeader>
                   <CardContent>
                     {(() => {
@@ -1318,10 +1330,10 @@ export function ContractDetail() {
                 </Card>
 
               {/* 补充协议列表 */}
-              {id && <SupplementList contractId={parseInt(id)} />}
+              {id && canViewSupplements && <SupplementList contractId={parseInt(id)} />}
 
               {/* 付款管理列表 */}
-              {id && <PaymentList contractId={parseInt(id)} />}
+              {id && canViewPayments && <PaymentList contractId={parseInt(id)} />}
 
               {/* 注意：OA合同的附件在右侧附件清单中显示，不使用ContractAttachments组件 */}
         </div>
@@ -1336,24 +1348,26 @@ export function ContractDetail() {
                     <CardTitle>合同附件 ({attachments.length})</CardTitle>
                     <CardDescription>选择要预览或解析的附件</CardDescription>
                   </div>
-                  <div>
-                    <input
-                      ref={uploadInputRef}
-                      type="file"
-                      className="hidden"
-                      accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.bmp,.webp,.xls,.xlsx"
-                      onChange={handleAttachmentUpload}
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={uploadingAttachment}
-                      onClick={() => uploadInputRef.current?.click()}
-                    >
-                      <Upload className="h-4 w-4 mr-1" />
-                      {uploadingAttachment ? '上传中...' : '上传附件'}
-                    </Button>
-                  </div>
+                  {canEditContract && (
+                    <div>
+                      <input
+                        ref={uploadInputRef}
+                        type="file"
+                        className="hidden"
+                        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.bmp,.webp,.xls,.xlsx"
+                        onChange={handleAttachmentUpload}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={uploadingAttachment}
+                        onClick={() => uploadInputRef.current?.click()}
+                      >
+                        <Upload className="h-4 w-4 mr-1" />
+                        {uploadingAttachment ? '上传中...' : '上传附件'}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </CardHeader>
               <CardContent>
@@ -1370,7 +1384,9 @@ export function ContractDetail() {
                         setSelectedAttachment(att)
                         setAttachmentError(null)
                         setIsLoadingAttachment(false)
-                        handleAttachmentPreview(att)
+                        if (canDownloadContract) {
+                          handleAttachmentPreview(att)
+                        }
                       }}
                     >
                       <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -1392,6 +1408,7 @@ export function ContractDetail() {
                         {att.is_primary ? (
                           <Badge variant="default" className="text-xs bg-primary">主附件</Badge>
                         ) : (
+                          canEditContract ? (
                           <>
                             <Button
                               variant="outline"
@@ -1447,6 +1464,7 @@ export function ContractDetail() {
                               <Trash2 className="h-4 w-4 text-destructive" />
                             </Button>
                           </>
+                          ) : null
                         )}
                       </div>
                     </div>
@@ -1462,24 +1480,26 @@ export function ContractDetail() {
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <CardTitle>合同附件</CardTitle>
-                  <div>
-                    <input
-                      ref={uploadInputRef}
-                      type="file"
-                      className="hidden"
-                      accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.bmp,.webp,.xls,.xlsx"
-                      onChange={handleAttachmentUpload}
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={uploadingAttachment}
-                      onClick={() => uploadInputRef.current?.click()}
-                    >
-                      <Upload className="h-4 w-4 mr-1" />
-                      {uploadingAttachment ? '上传中...' : '上传附件'}
-                    </Button>
-                  </div>
+                  {canEditContract && (
+                    <div>
+                      <input
+                        ref={uploadInputRef}
+                        type="file"
+                        className="hidden"
+                        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.bmp,.webp,.xls,.xlsx"
+                        onChange={handleAttachmentUpload}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={uploadingAttachment}
+                        onClick={() => uploadInputRef.current?.click()}
+                      >
+                        <Upload className="h-4 w-4 mr-1" />
+                        {uploadingAttachment ? '上传中...' : '上传附件'}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </CardHeader>
               <CardContent>
@@ -1532,7 +1552,9 @@ export function ContractDetail() {
                           setSelectedAttachment(att)
                           setAttachmentError(null)
                           setIsLoadingAttachment(false)
-                          handleAttachmentPreview(att)
+                          if (canDownloadContract) {
+                            handleAttachmentPreview(att)
+                          }
                         }}
                       >
                         <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -1547,6 +1569,7 @@ export function ContractDetail() {
                           {att.is_primary ? (
                             <Badge variant="default" className="text-xs bg-primary">主附件</Badge>
                           ) : (
+                            canEditContract ? (
                             <>
                               <Button
                                 variant="outline"
@@ -1597,6 +1620,7 @@ export function ContractDetail() {
                                 <Trash2 className="h-4 w-4 text-destructive" />
                               </Button>
                             </>
+                            ) : null
                           )}
                         </div>
                       </div>
@@ -1627,11 +1651,19 @@ export function ContractDetail() {
                 </div>
               )}
             </CardHeader>
-            <CardContent>
-              {contract?.fileUrl || contract?.source === 'oa_import' || selectedAttachment ? (
-                <div className="space-y-4">
-                  <div className="bg-muted rounded-lg overflow-auto" style={{ height: '70vh' }}>
-                    {selectedAttachment && (attachmentPreviewUrl || attachmentPreviewType === 'word') ? (
+              <CardContent>
+                {contract?.fileUrl || contract?.source === 'oa_import' || selectedAttachment ? (
+                  <div className="space-y-4">
+                    <div className="bg-muted rounded-lg overflow-auto" style={{ height: '70vh' }}>
+                    {selectedAttachment && !canDownloadContract ? (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <div className="text-center">
+                          <Download className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+                          <p className="text-muted-foreground">当前账号没有附件预览权限</p>
+                          <p className="text-sm text-muted-foreground mt-2">如需查看原文，请联系管理员开通下载权限</p>
+                        </div>
+                      </div>
+                    ) : selectedAttachment && (attachmentPreviewUrl || attachmentPreviewType === 'word') ? (
                       // 附件预览
                       <>
                         {isLoadingAttachment && (
@@ -1692,6 +1724,14 @@ export function ContractDetail() {
                           </>
                         )}
                       </>
+                    ) : !canDownloadContract ? (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <div className="text-center">
+                          <Download className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+                          <p className="text-muted-foreground">当前账号没有合同预览权限</p>
+                          <p className="text-sm text-muted-foreground mt-2">基础信息仍可查看，文件预览与下载需要额外授权</p>
+                        </div>
+                      </div>
                     ) : (previewUrl || mainPreviewType === 'word') ? (
                       // 主合同预览 - 支持PDF/Word/图片
                       <>
@@ -1736,7 +1776,7 @@ export function ContractDetail() {
                     )}
                   </div>
                   
-                  {contract?.source !== 'oa_import' && !selectedAttachment && (
+                  {contract?.source !== 'oa_import' && !selectedAttachment && canDownloadContract && (
                     <div className="flex gap-2">
                       <Button variant="outline" className="flex-1" onClick={handlePreview}>
                         <FileText className="h-4 w-4 mr-2" />
@@ -1851,7 +1891,7 @@ export function ContractDetail() {
         </Card>
       )}
 
-      {activeTab === 'payments' && (
+      {activeTab === 'payments' && canViewPayments && (
         <Card>
           <CardHeader>
             <CardTitle>关联付款记录</CardTitle>
@@ -1889,8 +1929,8 @@ export function ContractDetail() {
                       </TableCell>
                       <TableCell>{payment.operator || '-'}</TableCell>
                       <TableCell className="text-right">
-                        <Button variant="ghost" size="sm" asChild>
-                          <Link to={`/payments/${payment.id}`}>查看详情</Link>
+                        <Button variant="ghost" size="sm" onClick={() => navigate(`/payments/${payment.id}`)}>
+                          查看详情
                         </Button>
                       </TableCell>
                     </TableRow>

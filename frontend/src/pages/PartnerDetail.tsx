@@ -11,12 +11,14 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { partnerApi, PartnerRecord } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
 
 const formatAmount = (v?: number | null) =>
   v == null ? '-' : new Intl.NumberFormat('zh-CN', { style: 'decimal', minimumFractionDigits: 2 }).format(v)
 
 export function PartnerDetail() {
   const { id } = useParams<{ id: string }>()
+  const { hasPermission } = useAuth()
   const navigate = useNavigate()
   const [partner, setPartner] = useState<PartnerRecord | null>(null)
   const [loading, setLoading] = useState(true)
@@ -25,6 +27,9 @@ export function PartnerDetail() {
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [form, setForm] = useState<Partial<PartnerRecord>>({})
+  const canEditPartner = hasPermission('partner.edit')
+  const canDeletePartner = hasPermission('partner.delete')
+  const canUploadAttachment = hasPermission('partner.upload_attachment')
 
   const load = async () => {
     if (!id) return
@@ -103,7 +108,7 @@ export function PartnerDetail() {
           </div>
         </div>
         <div className="flex gap-2">
-          {isEditing ? (
+          {canEditPartner && isEditing ? (
             <>
               <Button variant="outline" onClick={() => { setIsEditing(false); setForm(partner) }}>
                 <X className="h-4 w-4 mr-2" />取消
@@ -112,16 +117,22 @@ export function PartnerDetail() {
                 <Save className="h-4 w-4 mr-2" />{saving ? '保存中...' : '保存'}
               </Button>
             </>
-          ) : (
+          ) : canEditPartner ? (
             <>
               <Button variant="outline" onClick={() => setIsEditing(true)}>
                 <Edit className="h-4 w-4 mr-2" />编辑
               </Button>
-              <Button variant="destructive" onClick={handleDelete}>
-                <Trash2 className="h-4 w-4 mr-2" />删除
-              </Button>
+              {canDeletePartner && (
+                <Button variant="destructive" onClick={handleDelete}>
+                  <Trash2 className="h-4 w-4 mr-2" />删除
+                </Button>
+              )}
             </>
-          )}
+          ) : canDeletePartner ? (
+            <Button variant="destructive" onClick={handleDelete}>
+              <Trash2 className="h-4 w-4 mr-2" />删除
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -196,13 +207,15 @@ export function PartnerDetail() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle>附件资料</CardTitle>
-                <div>
-                  <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} />
-                  <Button variant="outline" size="sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
-                    <Upload className="h-4 w-4 mr-1" />
-                    {uploading ? '上传中...' : '上传'}
-                  </Button>
-                </div>
+                {canUploadAttachment && (
+                  <div>
+                    <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} />
+                    <Button variant="outline" size="sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
+                      <Upload className="h-4 w-4 mr-1" />
+                      {uploading ? '上传中...' : '上传'}
+                    </Button>
+                  </div>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -222,9 +235,11 @@ export function PartnerDetail() {
                             <Download className="h-4 w-4" />
                           </a>
                         </Button>
-                        <Button variant="ghost" size="icon" onClick={() => handleDeleteAttachment(att.id)}>
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
+                        {canEditPartner && (
+                          <Button variant="ghost" size="icon" onClick={() => handleDeleteAttachment(att.id)}>
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        )}
                       </div>
                     </div>
                   ))}

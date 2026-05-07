@@ -11,6 +11,8 @@ from app.database import get_db, Payment, Contract, ContractAttachment, User
 from app.auth import get_current_user
 from app.services import file_storage
 from app.services.payment_parser import payment_parser
+from app.security.permissions import apply_data_scope, ensure_entity_access, populate_ownership_fields, require_permission
+from app.security.principal import Principal
 
 router = APIRouter(prefix="/payments", tags=["付款管理"])
 
@@ -41,7 +43,7 @@ class PaymentManagementResponse(BaseModel):
 @router.post("/management/import-pdf", response_model=dict)
 async def import_payment_pdf(
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.import_pdf")),
     db: Session = Depends(get_db)
 ):
     """上传OA付款申请PDF，自动解析并创建付款记录"""
@@ -110,6 +112,7 @@ async def import_payment_pdf(
             file_path=file_path,
             file_size=file_size,
         )
+        populate_ownership_fields(payment, principal)
         db.add(payment)
         db.commit()
         db.refresh(payment)
@@ -132,11 +135,12 @@ def list_payments_management(
     page: int = 1,
     page_size: int = 10,
     search: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.view")),
     db: Session = Depends(get_db)
 ):
     """付款管理列表"""
     query = db.query(Payment).filter(Payment.is_deleted == False)
+    query = apply_data_scope(query, principal, "payment", db, Payment)
     
     if search:
         query = query.filter(
@@ -178,10 +182,15 @@ def list_payments_management(
 @router.get("/by-contract/{contract_id}", response_model=dict)
 def get_payments_by_contract(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.view")),
     db: Session = Depends(get_db)
 ):
     """获取合同关联的付款记录"""
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
+
     payments = db.query(Payment).filter(
         Payment.contract_id == contract_id,
         Payment.is_deleted == False
@@ -208,7 +217,7 @@ def get_payments_by_contract(
 @router.get("/management/{payment_id}", response_model=dict)
 def get_payment_management(
     payment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.view")),
     db: Session = Depends(get_db)
 ):
     """付款管理详情"""
@@ -219,6 +228,7 @@ def get_payment_management(
     
     if not payment:
         raise HTTPException(status_code=404, detail="付款记录不存在")
+    ensure_entity_access(payment, principal, "payment", db)
     
     contract = None
     if payment.contract_id:
@@ -281,7 +291,7 @@ def get_payment_management(
 def link_payment_to_contract(
     payment_id: int,
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.edit")),
     db: Session = Depends(get_db)
 ):
     """将付款记录关联到合同"""
@@ -292,6 +302,7 @@ def link_payment_to_contract(
     
     if not payment:
         raise HTTPException(status_code=404, detail="付款记录不存在")
+    ensure_entity_access(payment, principal, "payment", db)
     
     # 验证合同是否存在
     contract = db.query(Contract).filter(
@@ -301,6 +312,7 @@ def link_payment_to_contract(
     
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     # 更新关联
     payment.contract_id = contract_id
@@ -325,11 +337,12 @@ def search_payments(
     q: str = "",
     exclude_contract_id: Optional[int] = None,
     page_size: int = 20,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.view")),
     db: Session = Depends(get_db)
 ):
     """搜索付款记录（用于关联到合同）"""
     query = db.query(Payment).filter(Payment.is_deleted == False)
+    query = apply_data_scope(query, principal, "payment", db, Payment)
 
     if q.strip():
         query = query.filter(
@@ -374,7 +387,7 @@ def search_payments(
 def link_payment(
     contract_id: int,
     payment_id: int = Body(..., embed=True),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.edit")),
     db: Session = Depends(get_db)
 ):
     """将已有付款记录关联到合同"""
@@ -384,6 +397,7 @@ def link_payment(
     ).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     payment = db.query(Payment).filter(
         Payment.id == payment_id,
@@ -391,6 +405,7 @@ def link_payment(
     ).first()
     if not payment:
         raise HTTPException(status_code=404, detail="付款记录不存在")
+    ensure_entity_access(payment, principal, "payment", db)
 
     if payment.contract_id == contract_id:
         raise HTTPException(status_code=400, detail="该付款记录已关联到此合同")
@@ -417,13 +432,14 @@ async def upload_payment(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     description: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.create")),
     db: Session = Depends(get_db)
 ):
     """上传付款资料"""
     contract = db.query(Contract).filter(Contract.id == contract_id).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     # 保存文件
     file_path, file_size = await file_storage.save_upload_file(
@@ -438,6 +454,9 @@ async def upload_payment(
         file_path=file_path,
         file_size=file_size
     )
+    populate_ownership_fields(payment, principal)
+    if not payment.owner_org_id and contract.owner_org_id:
+        payment.owner_org_id = contract.owner_org_id
     db.add(payment)
     db.commit()
     db.refresh(payment)
@@ -517,13 +536,14 @@ def _parse_payment_background(payment_id: int, file_path: str):
 @router.get("/{contract_id}/list")
 def list_contract_payments(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.view")),
     db: Session = Depends(get_db)
 ):
     """获取合同的付款记录列表"""
     contract = db.query(Contract).filter(Contract.id == contract_id).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     payments = db.query(Payment).filter(
         Payment.contract_id == contract_id,
@@ -546,7 +566,7 @@ def list_contract_payments(
 @router.get("/{payment_id}/download")
 def download_payment(
     payment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.download")),
     db: Session = Depends(get_db)
 ):
     """下载付款资料"""
@@ -557,6 +577,7 @@ def download_payment(
     
     if not payment:
         raise HTTPException(status_code=404, detail="付款记录不存在")
+    ensure_entity_access(payment, principal, "payment", db)
     
     if not payment.file_path or not os.path.exists(payment.file_path):
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -575,7 +596,7 @@ def download_payment(
 def update_payment_management(
     payment_id: int,
     data: dict,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.edit")),
     db: Session = Depends(get_db)
 ):
     """更新付款管理记录"""
@@ -586,6 +607,7 @@ def update_payment_management(
 
     if not payment:
         raise HTTPException(status_code=404, detail="付款记录不存在")
+    ensure_entity_access(payment, principal, "payment", db)
 
     allowed_fields = {
         "payment_theme", "payment_date", "amount", "operator",
@@ -618,7 +640,7 @@ def update_payment_management(
 @router.delete("/{payment_id}")
 def delete_payment(
     payment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("payment.delete")),
     db: Session = Depends(get_db)
 ):
     """删除付款记录"""
@@ -629,6 +651,7 @@ def delete_payment(
     
     if not payment:
         raise HTTPException(status_code=404, detail="付款记录不存在")
+    ensure_entity_access(payment, principal, "payment", db)
     
     payment.is_deleted = True
     db.commit()

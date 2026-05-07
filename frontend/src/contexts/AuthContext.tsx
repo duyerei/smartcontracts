@@ -8,6 +8,12 @@ export interface AuthUser {
   real_name: string
   department: string
   role: 'admin' | 'user'
+  primary_org_id?: number | null
+  primary_org_name?: string | null
+  role_ids?: number[]
+  roles?: Array<{ id: number; code: string; name: string }>
+  permissions?: string[]
+  data_scopes?: Record<string, { scope_type?: string | null; scope_types?: string[]; org_ids?: number[] }>
   is_active: boolean
 }
 
@@ -15,6 +21,7 @@ interface AuthContextType {
   user: AuthUser | null
   token: string | null
   loading: boolean
+  hasPermission: (permission: string) => boolean
   login: (username: string, password: string) => Promise<string | null>
   logout: () => void
 }
@@ -23,6 +30,7 @@ const AuthContext = createContext<AuthContextType>({
   user: null,
   token: null,
   loading: true,
+  hasPermission: () => false,
   login: async () => null,
   logout: () => {},
 })
@@ -52,6 +60,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLoading(false)
     }
   }, [token])
+
+  const hasPermission = (permission: string) => {
+    if (!user) return false
+    if (user.role === 'admin') return true
+    return !!user.permissions?.includes(permission)
+  }
 
   const login = async (username: string, password: string): Promise<string | null> => {
     try {
@@ -87,7 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, token, loading, hasPermission, login, logout }}>
       {children}
     </AuthContext.Provider>
   )

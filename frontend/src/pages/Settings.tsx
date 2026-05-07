@@ -12,7 +12,6 @@ import {
   XCircle,
   GitCommit,
   Tag,
-  Users,
   Pencil,
   ShieldCheck,
   User,
@@ -150,7 +149,6 @@ const tabs: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: 'security', label: '安全设置', icon: <Shield className="h-4 w-4" /> },
   { key: 'logs', label: '审计日志', icon: <Activity className="h-4 w-4" /> },
   { key: 'changelog', label: '版本日志', icon: <GitCommit className="h-4 w-4" /> },
-  { key: 'users', label: '用户管理', icon: <Users className="h-4 w-4" /> },
 ]
 
 export function SettingsPage() {

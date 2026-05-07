@@ -1,15 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Body
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel
-import os
-import re
 
-from app.database import get_db, Supplement, Contract, User, SessionLocal
-from app.auth import get_current_user
-from app.services import file_storage
+from app.database import get_db, Supplement, Contract
+from app.security.permissions import ensure_entity_access, require_permission
+from app.security.principal import Principal
 
 router = APIRouter(prefix="/supplements", tags=["补充协议"])
 
@@ -49,27 +46,29 @@ def _contract_to_supplement_dict(s: Supplement, linked_contract: Contract = None
     return result
 
 
+def _get_contract_or_404(db: Session, contract_id: int, detail: str) -> Contract:
+    contract = db.query(Contract).filter(
+        Contract.id == contract_id,
+        Contract.is_deleted == False,
+    ).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail=detail)
+    return contract
+
+
 @router.post("/{contract_id}/link")
 def link_supplement(
     contract_id: int,
     body: LinkSupplementRequest,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("supplement.create")),
     db: Session = Depends(get_db)
 ):
     """将另一份合同关联为当前合同的补充协议"""
-    contract = db.query(Contract).filter(
-        Contract.id == contract_id,
-        Contract.is_deleted == False
-    ).first()
-    if not contract:
-        raise HTTPException(status_code=404, detail="主合同不存在")
+    contract = _get_contract_or_404(db, contract_id, "主合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
-    linked = db.query(Contract).filter(
-        Contract.id == body.linked_contract_id,
-        Contract.is_deleted == False
-    ).first()
-    if not linked:
-        raise HTTPException(status_code=404, detail="关联合同不存在")
+    linked = _get_contract_or_404(db, body.linked_contract_id, "关联合同不存在")
+    ensure_entity_access(linked, principal, "contract", db)
 
     if body.linked_contract_id == contract_id:
         raise HTTPException(status_code=400, detail="不能将合同关联为自身的补充协议")
@@ -102,16 +101,12 @@ def link_supplement(
 @router.get("/{contract_id}/list")
 def list_supplements(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("supplement.view")),
     db: Session = Depends(get_db)
 ):
     """获取合同的所有补充协议"""
-    contract = db.query(Contract).filter(
-        Contract.id == contract_id,
-        Contract.is_deleted == False
-    ).first()
-    if not contract:
-        raise HTTPException(status_code=404, detail="主合同不存在")
+    contract = _get_contract_or_404(db, contract_id, "主合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     supplements = db.query(Supplement).filter(
         Supplement.contract_id == contract_id,
@@ -126,6 +121,11 @@ def list_supplements(
                 Contract.id == s.linked_contract_id,
                 Contract.is_deleted == False
             ).first()
+            if linked_contract and not linked_contract.is_deleted:
+                try:
+                    ensure_entity_access(linked_contract, principal, "contract", db)
+                except HTTPException:
+                    continue
         result.append(_contract_to_supplement_dict(s, linked_contract))
 
     return {"supplements": result}
@@ -134,7 +134,7 @@ def list_supplements(
 @router.delete("/{supplement_id}")
 def delete_supplement(
     supplement_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("supplement.delete")),
     db: Session = Depends(get_db)
 ):
     """删除补充协议关联"""
@@ -145,6 +145,12 @@ def delete_supplement(
     if not supplement:
         raise HTTPException(status_code=404, detail="补充协议不存在")
 
+    contract = _get_contract_or_404(db, supplement.contract_id, "主合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
+    if supplement.linked_contract_id:
+        linked_contract = _get_contract_or_404(db, supplement.linked_contract_id, "关联合同不存在")
+        ensure_entity_access(linked_contract, principal, "contract", db)
+
     supplement.is_deleted = True
     db.commit()
     return {"message": "补充协议删除成功"}
@@ -154,7 +160,7 @@ def delete_supplement(
 def update_supplement(
     supplement_id: int,
     update_data: SupplementUpdate = Body(...),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("supplement.edit")),
     db: Session = Depends(get_db)
 ):
     """更新补充协议信息"""
@@ -164,6 +170,13 @@ def update_supplement(
     ).first()
     if not supplement:
         raise HTTPException(status_code=404, detail="补充协议不存在")
+
+    contract = _get_contract_or_404(db, supplement.contract_id, "主合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
+    linked_contract = None
+    if supplement.linked_contract_id:
+        linked_contract = _get_contract_or_404(db, supplement.linked_contract_id, "关联合同不存在")
+        ensure_entity_access(linked_contract, principal, "contract", db)
 
     if update_data.title is not None:
         supplement.title = update_data.title
@@ -182,12 +195,5 @@ def update_supplement(
 
     db.commit()
     db.refresh(supplement)
-
-    linked_contract = None
-    if supplement.linked_contract_id:
-        db_session = db
-        linked_contract = db_session.query(Contract).filter(
-            Contract.id == supplement.linked_contract_id
-        ).first()
 
     return _contract_to_supplement_dict(supplement, linked_contract)

@@ -32,8 +32,10 @@ import {
 import { contractApi, paymentManagementApi } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import type { Contract } from '@/types'
+import { useAuth } from '@/contexts/AuthContext'
 
 export function Dashboard() {
+  const { hasPermission } = useAuth()
   const navigate = useNavigate()
   const [dragActive, setDragActive] = useState(false)
   const [paymentDragActive, setPaymentDragActive] = useState(false)
@@ -45,19 +47,29 @@ export function Dashboard() {
   const [searchQuery, setSearchQuery] = useState('')
   const contractFileRef = useRef<HTMLInputElement>(null)
   const paymentFileRef = useRef<HTMLInputElement>(null)
+  const canViewContracts = hasPermission('contract.view')
+  const canCreateContracts = hasPermission('contract.create')
+  const canImportPaymentPdf = hasPermission('payment.import_pdf')
+  const canImportOa = hasPermission('contract.import_oa')
 
   useEffect(() => {
     const loadData = async () => {
+      if (!canViewContracts) {
+        setRecentContracts([])
+        setTotalContracts(0)
+        setLoading(false)
+        return
+      }
       setLoading(true)
       const result = await contractApi.list({ page: 1, page_size: 4 })
       if (result.data) {
-        setRecentContracts(result.data.contracts as Contract[])
+        setRecentContracts(result.data.contracts as unknown as Contract[])
         setTotalContracts(result.data.total)
       }
       setLoading(false)
     }
     loadData()
-  }, [])
+  }, [canViewContracts])
 
   const pendingCount = recentContracts.filter(c => c.status === '待审核').length
 
@@ -182,12 +194,14 @@ export function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">工作台</h1>
-        <Link to="/contracts">
-          <Button variant="outline" size="sm">
-            <ArrowRight className="h-4 w-4 mr-2" />
-            查看全部合同
-          </Button>
-        </Link>
+        {canViewContracts && (
+          <Link to="/contracts">
+            <Button variant="outline" size="sm">
+              <ArrowRight className="h-4 w-4 mr-2" />
+              查看全部合同
+            </Button>
+          </Link>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -215,125 +229,158 @@ export function Dashboard() {
       </div>
 
       {/* 智能搜索 */}
-      <Card>
-        <CardContent className="pt-6">
-          <form onSubmit={(e) => { e.preventDefault(); if (searchQuery.trim()) navigate(`/contracts?search=${encodeURIComponent(searchQuery)}`) }}>
-            <div className="flex gap-3">
-              <div className="flex-1 relative">
-                <Search className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
-                <Input
-                  placeholder="搜索合同编号、名称、签约方..."
-                  className="pl-10 h-11"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
+      {canViewContracts && (
+        <Card>
+          <CardContent className="pt-6">
+            <form onSubmit={(e) => { e.preventDefault(); if (searchQuery.trim()) navigate(`/contracts?search=${encodeURIComponent(searchQuery)}`) }}>
+              <div className="flex gap-3">
+                <div className="flex-1 relative">
+                  <Search className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
+                  <Input
+                    placeholder="搜索合同编号、名称、签约方..."
+                    className="pl-10 h-11"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                </div>
+                <Button type="submit" className="h-11 px-6">
+                  <Sparkles className="h-4 w-4 mr-2" />
+                  搜索
+                </Button>
               </div>
-              <Button type="submit" className="h-11 px-6">
-                <Sparkles className="h-4 w-4 mr-2" />
-                搜索
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>上传合同</CardTitle>
-            <CardDescription>拖拽PDF文件到此处上传，或点击选择文件</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div
-              className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer ${
-                dragActive ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'
-              }`}
-              onDragEnter={handleDrag}
-              onDragLeave={handleDrag}
-              onDragOver={handleDrag}
-              onDrop={handleDrop}
-              onClick={() => contractFileRef.current?.click()}
-            >
-              <FileText className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <p className="text-sm text-muted-foreground mb-4">
-                拖拽PDF文件到此处，或点击选择文件
-              </p>
-              <input
-                ref={contractFileRef}
-                type="file"
-                accept=".pdf"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  if (file) handleContractUpload(file)
-                  e.target.value = ''
-                }}
-              />
-              <Button variant="outline" disabled={uploading} onClick={(e) => { e.stopPropagation(); contractFileRef.current?.click() }}>
-                <Upload className="h-4 w-4 mr-2" />
-                {uploading ? '上传中...' : '选择文件'}
-              </Button>
-              <p className="text-xs text-muted-foreground mt-4">支持 PDF 格式，单个文件最大 50MB</p>
-            </div>
+            </form>
           </CardContent>
         </Card>
+      )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>上传付款单</CardTitle>
-            <CardDescription>上传OA付款申请PDF，自动解析付款信息</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div
-              className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer ${
-                paymentDragActive ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'
-              }`}
-              onDragEnter={handlePaymentDrag}
-              onDragLeave={handlePaymentDrag}
-              onDragOver={handlePaymentDrag}
-              onDrop={handlePaymentDrop}
-              onClick={() => paymentFileRef.current?.click()}
-            >
-              <CreditCard className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <p className="text-sm text-muted-foreground mb-4">
-                拖拽付款申请PDF到此处，或点击选择文件
-              </p>
-              <input
-                ref={paymentFileRef}
-                type="file"
-                accept=".pdf"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  if (file) handlePaymentUpload(file)
-                  e.target.value = ''
-                }}
-              />
-              <Button variant="outline" disabled={paymentUploading} onClick={(e) => { e.stopPropagation(); paymentFileRef.current?.click() }}>
-                <Upload className="h-4 w-4 mr-2" />
-                {paymentUploading ? '解析中...' : '选择文件'}
-              </Button>
-              <p className="text-xs text-muted-foreground mt-4">支持 PDF 格式，自动提取付款信息</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {(canCreateContracts || canImportPaymentPdf || canImportOa) && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {canCreateContracts && (
+            <Card>
+              <CardHeader>
+                <CardTitle>上传合同</CardTitle>
+                <CardDescription>拖拽PDF文件到此处上传，或点击选择文件</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div
+                  className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer ${
+                    dragActive ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'
+                  }`}
+                  onDragEnter={handleDrag}
+                  onDragLeave={handleDrag}
+                  onDragOver={handleDrag}
+                  onDrop={handleDrop}
+                  onClick={() => contractFileRef.current?.click()}
+                >
+                  <FileText className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                  <p className="text-sm text-muted-foreground mb-4">
+                    拖拽PDF文件到此处，或点击选择文件
+                  </p>
+                  <input
+                    ref={contractFileRef}
+                    type="file"
+                    accept=".pdf"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (file) handleContractUpload(file)
+                      e.target.value = ''
+                    }}
+                  />
+                  <Button variant="outline" disabled={uploading} onClick={(e) => { e.stopPropagation(); contractFileRef.current?.click() }}>
+                    <Upload className="h-4 w-4 mr-2" />
+                    {uploading ? '上传中...' : '选择文件'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground mt-4">支持 PDF 格式，单个文件最大 50MB</p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {canImportPaymentPdf && (
+            <Card>
+              <CardHeader>
+                <CardTitle>上传付款单</CardTitle>
+                <CardDescription>上传OA付款申请PDF，自动解析付款信息</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div
+                  className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer ${
+                    paymentDragActive ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'
+                  }`}
+                  onDragEnter={handlePaymentDrag}
+                  onDragLeave={handlePaymentDrag}
+                  onDragOver={handlePaymentDrag}
+                  onDrop={handlePaymentDrop}
+                  onClick={() => paymentFileRef.current?.click()}
+                >
+                  <CreditCard className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                  <p className="text-sm text-muted-foreground mb-4">
+                    拖拽付款申请PDF到此处，或点击选择文件
+                  </p>
+                  <input
+                    ref={paymentFileRef}
+                    type="file"
+                    accept=".pdf"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (file) handlePaymentUpload(file)
+                      e.target.value = ''
+                    }}
+                  />
+                  <Button variant="outline" disabled={paymentUploading} onClick={(e) => { e.stopPropagation(); paymentFileRef.current?.click() }}>
+                    <Upload className="h-4 w-4 mr-2" />
+                    {paymentUploading ? '解析中...' : '选择文件'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground mt-4">支持 PDF 格式，自动提取付款信息</p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {canImportOa && (
+            <Card>
+              <CardHeader>
+                <CardTitle>OA批量导入</CardTitle>
+                <CardDescription>批量导入OA导出的合同与附件数据</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="border-2 border-dashed rounded-lg p-8 text-center">
+                  <FileText className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                  <p className="text-sm text-muted-foreground mb-4">
+                    通过数据导入页上传OA导出的JSON文件
+                  </p>
+                  <Button variant="outline" onClick={() => navigate('/upload')}>
+                    <Upload className="h-4 w-4 mr-2" />
+                    前往导入页
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
             <CardTitle>最近更新</CardTitle>
-            <CardDescription>最近更新的合同列表</CardDescription>
+            <CardDescription>{canViewContracts ? '最近更新的合同列表' : '当前账号没有合同查看权限'}</CardDescription>
           </div>
-          <Link to="/contracts">
-            <Button variant="ghost" size="sm">
-              查看全部
-              <ArrowRight className="h-4 w-4 ml-1" />
-            </Button>
-          </Link>
+          {canViewContracts && (
+            <Link to="/contracts">
+              <Button variant="ghost" size="sm">
+                查看全部
+                <ArrowRight className="h-4 w-4 ml-1" />
+              </Button>
+            </Link>
+          )}
         </CardHeader>
         <CardContent>
-          {loading ? (
+          {!canViewContracts ? (
+            <p className="text-center py-8 text-muted-foreground">当前账号未开通合同查看权限</p>
+          ) : loading ? (
             <p className="text-center py-8 text-muted-foreground">加载中...</p>
           ) : recentContracts.length === 0 ? (
             <p className="text-center py-8 text-muted-foreground">暂无合同数据</p>

@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { useAuth } from '@/contexts/AuthContext'
 
 interface Payment {
   id: number
@@ -34,6 +35,7 @@ interface PaymentListProps {
 }
 
 export function PaymentList({ contractId }: PaymentListProps) {
+  const { hasPermission } = useAuth()
   const [payments, setPayments] = useState<Payment[]>([])
   const [loading, setLoading] = useState(false)
   const [showUploadDialog, setShowUploadDialog] = useState(false)
@@ -50,6 +52,10 @@ export function PaymentList({ contractId }: PaymentListProps) {
   const [searchResults, setSearchResults] = useState<PaymentSearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [linking, setLinking] = useState(false)
+  const canCreatePayment = hasPermission('payment.create')
+  const canEditPayment = hasPermission('payment.edit')
+  const canDeletePayment = hasPermission('payment.delete')
+  const canDownloadPayment = hasPermission('payment.download')
 
   // 判断是否超时（创建时间超过2分钟）
   const isRecognitionTimeout = (createdAt: string) => {
@@ -320,16 +326,22 @@ export function PaymentList({ contractId }: PaymentListProps) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>付款管理</CardTitle>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => { setShowLinkDialog(true); searchPayments('') }}>
-            <Link2 className="h-4 w-4 mr-2" />
-            关联付款记录
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => setShowUploadDialog(true)}>
-            <Upload className="h-4 w-4 mr-2" />
-            上传付款凭证
-          </Button>
-        </div>
+        {(canEditPayment || canCreatePayment) && (
+          <div className="flex gap-2">
+            {canEditPayment && (
+              <Button variant="outline" size="sm" onClick={() => { setShowLinkDialog(true); searchPayments('') }}>
+                <Link2 className="h-4 w-4 mr-2" />
+                关联付款记录
+              </Button>
+            )}
+            {canCreatePayment && (
+              <Button variant="outline" size="sm" onClick={() => setShowUploadDialog(true)}>
+                <Upload className="h-4 w-4 mr-2" />
+                上传付款凭证
+              </Button>
+            )}
+          </div>
+        )}
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -359,12 +371,18 @@ export function PaymentList({ contractId }: PaymentListProps) {
                       <div className="flex items-center gap-2">
                         {getFileIcon(payment.file_path)}
                         {payment.file_path ? (
-                          <button
-                            onClick={() => handlePreview(payment)}
-                            className="font-medium text-primary hover:underline text-left"
-                          >
-                            {payment.description}{getFileExtension(payment.file_path)}
-                          </button>
+                          canDownloadPayment ? (
+                            <button
+                              onClick={() => handlePreview(payment)}
+                              className="font-medium text-primary hover:underline text-left"
+                            >
+                              {payment.description}{getFileExtension(payment.file_path)}
+                            </button>
+                          ) : (
+                            <span className="font-medium text-muted-foreground">
+                              {payment.description}{getFileExtension(payment.file_path)}
+                            </span>
+                          )
                         ) : (
                           <span className="font-medium text-muted-foreground">{payment.description}</span>
                         )}
@@ -390,22 +408,26 @@ export function PaymentList({ contractId }: PaymentListProps) {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleEdit(payment)}
-                          title="编辑"
-                        >
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleDelete(payment.id)}
-                          title="删除"
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
+                        {canEditPayment && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleEdit(payment)}
+                            title="编辑"
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {canDeletePayment && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleDelete(payment.id)}
+                            title="删除"
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        )}
                       </div>
                     </td>
                   </tr>

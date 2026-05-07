@@ -5,8 +5,7 @@ import {
   FileText, 
   Sparkles,
   Clock,
-  ArrowRight,
-  Filter
+  ArrowRight
 } from 'lucide-react'
 import { 
   Card, 
@@ -18,13 +17,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { Select } from '@/components/ui/select'
 import type { Contract } from '@/types'
 
 const mockSearchResults: Contract[] = [
@@ -38,6 +31,7 @@ const mockSearchResults: Contract[] = [
     parties: ['华为技术有限公司'],
     amount: 500000,
     currency: 'CNY',
+    signedDate: '2025-01-15',
     startDate: '2025-01-15',
     endDate: '2025-12-31',
     createdAt: '2025-01-15',
@@ -54,6 +48,7 @@ const mockSearchResults: Contract[] = [
     parties: ['XX物业管理有限公司'],
     amount: 1200000,
     currency: 'CNY',
+    signedDate: '2024-01-01',
     startDate: '2024-01-01',
     endDate: '2025-12-31',
     createdAt: '2024-01-01',
@@ -134,15 +129,14 @@ export function Search() {
                 onKeyDown={handleKeyDown}
               />
             </div>
-            <Select value={searchType} onValueChange={setSearchType}>
-              <SelectTrigger className="w-40">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="semantic">语义搜索</SelectItem>
-                <SelectItem value="keyword">关键词搜索</SelectItem>
-                <SelectItem value="fuzzy">模糊搜索</SelectItem>
-              </SelectContent>
+            <Select
+              className="w-40"
+              value={searchType}
+              onChange={(e) => setSearchType(e.target.value)}
+            >
+              <option value="semantic">语义搜索</option>
+              <option value="keyword">关键词搜索</option>
+              <option value="fuzzy">模糊搜索</option>
             </Select>
             <Button size="lg" onClick={() => handleSearch()} disabled={isSearching}>
               {isSearching ? (

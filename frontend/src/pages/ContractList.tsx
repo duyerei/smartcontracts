@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { 
   Search, 
-  AlertCircle
 } from 'lucide-react'
 import { 
   Card, 
@@ -70,7 +69,7 @@ export function ContractList() {
       sort_order: sortOrder,
     })
     if (result.data) {
-      setContracts(result.data.contracts as Contract[])
+      setContracts(result.data.contracts as unknown as Contract[])
       setTotal(result.data.total)
     }
     setLoading(false)
@@ -122,7 +121,7 @@ export function ContractList() {
 
   const getStatusBadge = (status?: string, endDate?: string) => {
     if (!status || !endDate) return null
-    const variants = {
+    const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'warning' | 'success'> = {
       '合同履行中': 'success',
       '即将到期': 'destructive',
       '履行完成': 'secondary',
@@ -133,31 +132,6 @@ export function ContractList() {
       '已终止': 'secondary',
     } as const
     return <Badge variant={variants[status as keyof typeof variants] || 'default'}>{status}</Badge>
-  }
-
-  const getRiskBadge = (risk?: 'low' | 'medium' | 'high') => {
-    if (!risk) return null
-    const variants = {
-      low: 'success',
-      medium: 'warning',
-      high: 'destructive',
-    }
-    const labels = {
-      low: '低风险',
-      medium: '中风险',
-      high: '高风险',
-    }
-    return (
-      <Badge variant={variants[risk]} className="ml-2">
-        <AlertCircle className="h-3 w-3 mr-1" />
-        {labels[risk]}
-      </Badge>
-    )
-  }
-
-  const formatAmount = (amount: number | null, currency: string) => {
-    if (amount === null) return '-'
-    return new Intl.NumberFormat('zh-CN', { style: 'currency', currency }).format(amount)
   }
 
   return (

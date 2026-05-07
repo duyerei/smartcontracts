@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { useNavigate } from 'react-router-dom'
+import { useAuth } from '@/contexts/AuthContext'
 
 interface LinkedContract {
   id: number
@@ -45,6 +46,7 @@ interface SupplementListProps {
 
 export function SupplementList({ contractId }: SupplementListProps) {
   const navigate = useNavigate()
+  const { hasPermission } = useAuth()
   const [supplements, setSupplements] = useState<Supplement[]>([])
   const [loading, setLoading] = useState(false)
   const [showLinkDialog, setShowLinkDialog] = useState(false)
@@ -52,6 +54,8 @@ export function SupplementList({ contractId }: SupplementListProps) {
   const [searchResults, setSearchResults] = useState<ContractSearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [linking, setLinking] = useState(false)
+  const canCreateSupplement = hasPermission('supplement.create')
+  const canDeleteSupplement = hasPermission('supplement.delete')
 
   useEffect(() => {
     loadSupplements()
@@ -169,10 +173,12 @@ export function SupplementList({ contractId }: SupplementListProps) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>补充协议</CardTitle>
-        <Button variant="outline" size="sm" onClick={() => setShowLinkDialog(true)}>
-          <Link2 className="h-4 w-4 mr-2" />
-          关联补充协议
-        </Button>
+        {canCreateSupplement && (
+          <Button variant="outline" size="sm" onClick={() => setShowLinkDialog(true)}>
+            <Link2 className="h-4 w-4 mr-2" />
+            关联补充协议
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -237,14 +243,16 @@ export function SupplementList({ contractId }: SupplementListProps) {
                               <ExternalLink className="h-4 w-4" />
                             </Button>
                           )}
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDelete(supplement.id)}
-                            title="解除关联"
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                          {canDeleteSupplement && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDelete(supplement.id)}
+                              title="解除关联"
+                            >
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          )}
                         </div>
                       </td>
                     </tr>

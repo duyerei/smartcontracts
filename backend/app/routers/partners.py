@@ -10,6 +10,8 @@ from pathlib import Path
 
 from app.database import get_db, Partner, PartnerAttachment, Contract, User
 from app.auth import get_current_user
+from app.security.permissions import apply_data_scope, ensure_entity_access, populate_ownership_fields, require_permission
+from app.security.principal import Principal
 
 router = APIRouter(prefix="/partners", tags=["合作伙伴"])
 
@@ -50,11 +52,12 @@ def list_partners(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.view")),
     db: Session = Depends(get_db)
 ):
     """合作伙伴列表"""
     query = db.query(Partner).filter(Partner.is_deleted == False)
+    query = apply_data_scope(query, principal, "partner", db, Partner)
     if search:
         query = query.filter(
             (Partner.name.contains(search)) |
@@ -86,7 +89,7 @@ def list_partners(
 
 @router.post("/deduplicate")
 def deduplicate_partners(
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.edit")),
     db: Session = Depends(get_db)
 ):
     """手动触发合作伙伴去重（直接SQL + Python双重去重）"""
@@ -120,7 +123,7 @@ def deduplicate_partners(
 @router.post("")
 def create_partner(
     data: dict,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.create")),
     db: Session = Depends(get_db)
 ):
     """新建合作伙伴"""
@@ -144,6 +147,7 @@ def create_partner(
         bank_account=data.get("bank_account"),
         notes=data.get("notes"),
     )
+    populate_ownership_fields(partner, principal)
     db.add(partner)
     db.commit()
     db.refresh(partner)
@@ -152,7 +156,7 @@ def create_partner(
 
 @router.get("/sync-from-contracts")
 def sync_partners_from_contracts(
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.create")),
     db: Session = Depends(get_db)
 ):
     """从合同中自动提取合作伙伴（去重），同时清理已有重复"""
@@ -198,7 +202,12 @@ def sync_partners_from_contracts(
                 continue
             normalized = _normalize_name(name)
             if normalized not in existing_normalized:
-                partner = Partner(name=name)
+                partner = Partner(
+                    name=name,
+                    owner_org_id=contract.owner_org_id,
+                    owner_user_id=contract.owner_user_id,
+                    created_by=contract.created_by,
+                )
                 db.add(partner)
                 existing_normalized[normalized] = partner
                 created += 1
@@ -257,13 +266,14 @@ def _deduplicate_existing_partners(db: Session) -> int:
 @router.get("/{partner_id}")
 def get_partner(
     partner_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.view")),
     db: Session = Depends(get_db)
 ):
     """合作伙伴详情"""
     partner = db.query(Partner).filter(Partner.id == partner_id, Partner.is_deleted == False).first()
     if not partner:
         raise HTTPException(status_code=404, detail="合作伙伴不存在")
+    ensure_entity_access(partner, principal, "partner", db)
 
     # 关联合同
     contracts = db.query(Contract).filter(
@@ -319,13 +329,14 @@ def get_partner(
 def update_partner(
     partner_id: int,
     data: dict,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.edit")),
     db: Session = Depends(get_db)
 ):
     """更新合作伙伴"""
     partner = db.query(Partner).filter(Partner.id == partner_id, Partner.is_deleted == False).first()
     if not partner:
         raise HTTPException(status_code=404, detail="合作伙伴不存在")
+    ensure_entity_access(partner, principal, "partner", db)
 
     for field in ("name", "contact_name", "contact_phone", "address", "bank_name", "bank_account", "notes"):
         if field in data:
@@ -339,12 +350,13 @@ def update_partner(
 @router.delete("/{partner_id}")
 def delete_partner(
     partner_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.delete")),
     db: Session = Depends(get_db)
 ):
     partner = db.query(Partner).filter(Partner.id == partner_id, Partner.is_deleted == False).first()
     if not partner:
         raise HTTPException(status_code=404, detail="合作伙伴不存在")
+    ensure_entity_access(partner, principal, "partner", db)
     partner.is_deleted = True
     partner.updated_at = datetime.now()
     db.commit()
@@ -355,13 +367,14 @@ def delete_partner(
 async def upload_partner_attachment(
     partner_id: int,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.upload_attachment")),
     db: Session = Depends(get_db)
 ):
     """上传合作伙伴附件"""
     partner = db.query(Partner).filter(Partner.id == partner_id, Partner.is_deleted == False).first()
     if not partner:
         raise HTTPException(status_code=404, detail="合作伙伴不存在")
+    ensure_entity_access(partner, principal, "partner", db)
 
     content = await file.read()
     file_id = str(uuid.uuid4())
@@ -388,9 +401,14 @@ async def upload_partner_attachment(
 def download_partner_attachment(
     partner_id: int,
     att_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.view")),
     db: Session = Depends(get_db)
 ):
+    partner = db.query(Partner).filter(Partner.id == partner_id, Partner.is_deleted == False).first()
+    if not partner:
+        raise HTTPException(status_code=404, detail="合作伙伴不存在")
+    ensure_entity_access(partner, principal, "partner", db)
+
     att = db.query(PartnerAttachment).filter(
         PartnerAttachment.id == att_id,
         PartnerAttachment.partner_id == partner_id,
@@ -405,9 +423,14 @@ def download_partner_attachment(
 def delete_partner_attachment(
     partner_id: int,
     att_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("partner.edit")),
     db: Session = Depends(get_db)
 ):
+    partner = db.query(Partner).filter(Partner.id == partner_id, Partner.is_deleted == False).first()
+    if not partner:
+        raise HTTPException(status_code=404, detail="合作伙伴不存在")
+    ensure_entity_access(partner, principal, "partner", db)
+
     att = db.query(PartnerAttachment).filter(
         PartnerAttachment.id == att_id,
         PartnerAttachment.partner_id == partner_id,

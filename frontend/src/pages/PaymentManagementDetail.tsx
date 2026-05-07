@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { renderAsync } from 'docx-preview'
 import { 
   ArrowLeft,
   FileText,
@@ -27,13 +26,7 @@ import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { paymentManagementApi, PaymentRecord, contractApi } from '@/lib/api'
-
-interface ContractAttachment {
-  id: number
-  file_name: string
-  file_path: string
-  file_size: number
-}
+import { useAuth } from '@/contexts/AuthContext'
 
 interface PaymentDetail extends PaymentRecord {
   contract?: {
@@ -77,17 +70,10 @@ const toDateInputValue = (dateStr?: string) => {
 
 export function PaymentManagementDetail() {
   const { id } = useParams<{ id: string }>()
+  const { hasPermission } = useAuth()
   const navigate = useNavigate()
   const [payment, setPayment] = useState<PaymentDetail | null>(null)
   const [loading, setLoading] = useState(true)
-  const [selectedAttachment, setSelectedAttachment] = useState<{id: number; file_name: string} | null>(null)
-  const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string>('')
-  const [attachmentPreviewType, setAttachmentPreviewType] = useState<'pdf' | 'image' | 'word' | 'unknown'>('unknown')
-  const [isLoadingAttachment, setIsLoadingAttachment] = useState(false)
-  const [attachmentError, setAttachmentError] = useState<string | null>(null)
-  const [wordArrayBuffer, setWordArrayBuffer] = useState<ArrayBuffer | null>(null)
-  const wordDocxContainerRef = useRef<HTMLDivElement>(null)
-  const [showPreview, setShowPreview] = useState(false)
   const [showContractSelector, setShowContractSelector] = useState(false)
   const [contractSearchQuery, setContractSearchQuery] = useState('')
   const [contractSearchResults, setContractSearchResults] = useState<any[]>([])
@@ -101,6 +87,9 @@ export function PaymentManagementDetail() {
   // 删除确认
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const canEditPayment = hasPermission('payment.edit')
+  const canDeletePayment = hasPermission('payment.delete')
+  const canDownloadPayment = hasPermission('payment.download')
 
   const startEditing = () => {
     if (!payment) return
@@ -222,13 +211,6 @@ export function PaymentManagementDetail() {
     fetchPayment()
   }, [id])
 
-  useEffect(() => {
-    if (wordArrayBuffer && wordDocxContainerRef.current) {
-      wordDocxContainerRef.current.innerHTML = ''
-      renderAsync(wordArrayBuffer, wordDocxContainerRef.current).catch(console.error)
-    }
-  }, [wordArrayBuffer])
-
   const formatAmount = (amount?: number) => {
     if (amount === undefined || amount === null) return '-'
     return new Intl.NumberFormat('zh-CN', { 
@@ -244,101 +226,6 @@ export function PaymentManagementDetail() {
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB'
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
   }
-
-  const handleAttachmentPreview = async (attachment: ContractAttachment) => {
-    if (!payment?.contract_id) return
-    
-    setSelectedAttachment(attachment)
-    setShowPreview(true)
-    setIsLoadingAttachment(true)
-    setAttachmentError(null)
-    setWordArrayBuffer(null)
-    
-    if (attachmentPreviewUrl) {
-      window.URL.revokeObjectURL(attachmentPreviewUrl)
-      setAttachmentPreviewUrl('')
-    }
-    
-    try {
-      const token = localStorage.getItem('token')
-      const response = await fetch(`/api/v1/contracts/${payment.contract_id}/attachments/${attachment.id}/download`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      })
-      
-      if (!response.ok) {
-        throw new Error(`获取附件失败 (HTTP ${response.status})`)
-      }
-      
-      const blob = await response.blob()
-      
-      if (blob.type === 'text/html' || blob.type === 'application/json') {
-        throw new Error('服务器返回错误响应')
-      }
-      
-      const ext = attachment.file_name.toLowerCase().split('.').pop() || ''
-      
-      if (ext === 'docx') {
-        setAttachmentPreviewType('word')
-        const reader = new FileReader()
-        reader.onload = (e) => {
-          const arrayBuffer = e.target?.result as ArrayBuffer
-          setWordArrayBuffer(arrayBuffer)
-          setIsLoadingAttachment(false)
-        }
-        reader.onerror = () => {
-          setAttachmentError('读取Word文件失败')
-          setIsLoadingAttachment(false)
-        }
-        reader.readAsArrayBuffer(blob)
-      } else if (ext === 'doc') {
-        try {
-          const pdfResponse = await fetch(`/api/v1/contracts/${payment.contract_id}/attachments/${attachment.id}/preview-pdf`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-          })
-          if (!pdfResponse.ok) {
-            const errData = await pdfResponse.json().catch(() => ({}))
-            throw new Error(errData.detail || '.doc 转 PDF 失败')
-          }
-          const pdfBlob = await pdfResponse.blob()
-          const url = window.URL.createObjectURL(pdfBlob)
-          setAttachmentPreviewUrl(url)
-          setAttachmentPreviewType('pdf')
-          setIsLoadingAttachment(false)
-        } catch (docErr) {
-          setAttachmentPreviewType('unknown')
-          setAttachmentError(`.doc 转 PDF 预览失败: ${(docErr as Error).message}，请下载后查看`)
-          setIsLoadingAttachment(false)
-        }
-      } else if (ext === 'pdf') {
-        const url = window.URL.createObjectURL(blob)
-        setAttachmentPreviewUrl(url)
-        setAttachmentPreviewType('pdf')
-        setIsLoadingAttachment(false)
-      } else if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext)) {
-        const url = window.URL.createObjectURL(blob)
-        setAttachmentPreviewUrl(url)
-        setAttachmentPreviewType('image')
-        setIsLoadingAttachment(false)
-      } else {
-        setAttachmentPreviewType('unknown')
-        setAttachmentError('不支持的文件格式，请下载后查看')
-        setIsLoadingAttachment(false)
-      }
-    } catch (error) {
-      console.error('预览附件失败:', error)
-      setAttachmentError(`预览附件失败: ${(error as Error).message}`)
-      setAttachmentPreviewType('unknown')
-      setIsLoadingAttachment(false)
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      if (attachmentPreviewUrl) {
-        window.URL.revokeObjectURL(attachmentPreviewUrl)
-      }
-    }
-  }, [attachmentPreviewUrl])
 
   if (loading) {
     return (
@@ -372,14 +259,16 @@ export function PaymentManagementDetail() {
           </Button>
           <h1 className="text-2xl font-bold">{payment.payment_theme}</h1>
         </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          onClick={() => setShowDeleteConfirm(true)}
-        >
-          <Trash2 className="h-4 w-4 mr-2" />
-          删除
-        </Button>
+        {canDeletePayment && (
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => setShowDeleteConfirm(true)}
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            删除
+          </Button>
+        )}
       </div>
 
       {/* 删除确认对话框 */}
@@ -415,7 +304,7 @@ export function PaymentManagementDetail() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>基本信息</CardTitle>
-              {isEditing ? (
+              {canEditPayment && isEditing ? (
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={cancelEditing} disabled={saving}>
                     <X className="h-4 w-4 mr-2" />
@@ -426,12 +315,12 @@ export function PaymentManagementDetail() {
                     {saving ? '保存中...' : '保存'}
                   </Button>
                 </div>
-              ) : (
+              ) : canEditPayment ? (
                 <Button variant="outline" size="sm" onClick={startEditing}>
                   <Edit className="h-4 w-4 mr-2" />
                   编辑
                 </Button>
-              )}
+              ) : null}
             </CardHeader>
             <CardContent>
               {isEditing ? (
@@ -602,10 +491,12 @@ export function PaymentManagementDetail() {
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle>关联合同</CardTitle>
-                <Button variant="outline" size="sm" onClick={handleOpenContractSelector}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  {payment.contract ? '更换关联' : '关联合同'}
-                </Button>
+                {canEditPayment && (
+                  <Button variant="outline" size="sm" onClick={handleOpenContractSelector}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    {payment.contract ? '更换关联' : '关联合同'}
+                  </Button>
+                )}
               </CardHeader>
               <CardContent>
                 {payment.contract ? (
@@ -671,9 +562,11 @@ export function PaymentManagementDetail() {
                 ) : (
                   <div className="text-muted-foreground text-center py-4">
                     <p>暂无关联合同</p>
-                    <Button variant="link" onClick={handleOpenContractSelector}>
-                      点击关联合同
-                    </Button>
+                    {canEditPayment && (
+                      <Button variant="link" onClick={handleOpenContractSelector}>
+                        点击关联合同
+                      </Button>
+                    )}
                   </div>
                 )}
               </CardContent>
@@ -713,19 +606,21 @@ export function PaymentManagementDetail() {
                         className="p-3 hover:bg-muted/50 cursor-pointer"
                         onClick={() => handleLinkContract(contract.id)}
                       >
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="font-medium">{contract.title}</p>
-                            <p className="text-sm text-muted-foreground">
-                              合同编号: {contract.contract_number}
-                            </p>
-                          </div>
-                          <Button variant="ghost" size="sm">
-                            关联
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-medium">{contract.title}</p>
+                      <p className="text-sm text-muted-foreground">
+                        合同编号: {contract.contract_number}
+                      </p>
+                    </div>
+                    {canEditPayment && (
+                      <Button variant="ghost" size="sm">
+                        关联
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
                   </div>
                 )}
               </div>
@@ -750,30 +645,32 @@ export function PaymentManagementDetail() {
                       </p>
                     </div>
                   </div>
-                  <Button variant="outline" size="sm" onClick={async () => {
-                    try {
-                      const token = localStorage.getItem('token')
-                      const response = await fetch(`/api/v1/payments/${payment.id}/download`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
-                      })
-                      if (!response.ok) throw new Error('下载失败')
-                      const blob = await response.blob()
-                      const url = window.URL.createObjectURL(blob)
-                      const a = document.createElement('a')
-                      a.href = url
-                      const ext = payment.file_path?.split('.').pop() || 'pdf'
-                      a.download = `${payment.description || '付款附件'}.${ext}`
-                      document.body.appendChild(a)
-                      a.click()
-                      window.URL.revokeObjectURL(url)
-                      document.body.removeChild(a)
-                    } catch (e) {
-                      alert('下载失败')
-                    }
-                  }}>
-                    <Download className="h-4 w-4 mr-2" />
-                    下载
-                  </Button>
+                  {canDownloadPayment && (
+                    <Button variant="outline" size="sm" onClick={async () => {
+                      try {
+                        const token = localStorage.getItem('token')
+                        const response = await fetch(`/api/v1/payments/${payment.id}/download`, {
+                          headers: { 'Authorization': `Bearer ${token}` }
+                        })
+                        if (!response.ok) throw new Error('下载失败')
+                        const blob = await response.blob()
+                        const url = window.URL.createObjectURL(blob)
+                        const a = document.createElement('a')
+                        a.href = url
+                        const ext = payment.file_path?.split('.').pop() || 'pdf'
+                        a.download = `${payment.description || '付款附件'}.${ext}`
+                        document.body.appendChild(a)
+                        a.click()
+                        window.URL.revokeObjectURL(url)
+                        document.body.removeChild(a)
+                      } catch (e) {
+                        alert('下载失败')
+                      }
+                    }}>
+                      <Download className="h-4 w-4 mr-2" />
+                      下载
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>

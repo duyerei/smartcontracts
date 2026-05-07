@@ -8,6 +8,8 @@ from app.database import Contract
 from app.schemas import AgentOperation
 from app.services.llm_service import llm_service
 from app.config import config
+from app.security.permissions import apply_data_scope
+from app.security.principal import Principal
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +145,17 @@ class AgentService:
         return filters
 
     @staticmethod
-    def list_contracts(db: Session, limit: int = 10, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def list_contracts(
+        db: Session,
+        limit: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        principal: Optional[Principal] = None,
+    ) -> List[Dict[str, Any]]:
         from datetime import datetime, timedelta
 
         query = db.query(Contract).filter(Contract.is_deleted == False)
+        if principal is not None:
+            query = apply_data_scope(query, principal, "contract", db, Contract)
 
         if filters:
             if filters.get("keyword"):
@@ -205,8 +214,15 @@ class AgentService:
         ]
 
     @staticmethod
-    def get_contract(db: Session, contract_id: int) -> Optional[Dict[str, Any]]:
-        c = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    def get_contract(
+        db: Session,
+        contract_id: int,
+        principal: Optional[Principal] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False)
+        if principal is not None:
+            query = apply_data_scope(query, principal, "contract", db, Contract)
+        c = query.first()
         if not c:
             return None
         return {

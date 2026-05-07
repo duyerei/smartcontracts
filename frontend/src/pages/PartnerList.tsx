@@ -9,8 +9,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { partnerApi, PartnerRecord } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
 
 export function PartnerList() {
+  const { hasPermission } = useAuth()
   const navigate = useNavigate()
   const [partners, setPartners] = useState<PartnerRecord[]>([])
   const [total, setTotal] = useState(0)
@@ -22,6 +24,8 @@ export function PartnerList() {
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState({ name: '', contact_name: '', contact_phone: '', address: '' })
   const [saving, setSaving] = useState(false)
+  const canCreatePartner = hasPermission('partner.create')
+  const canEditPartner = hasPermission('partner.edit')
 
   const pageSize = 20
 
@@ -92,18 +96,24 @@ export function PartnerList() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">合作伙伴</h1>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={handleDedup} disabled={deduping}>
-            <RefreshCw className={`h-4 w-4 mr-2 ${deduping ? 'animate-spin' : ''}`} />
-            去重
-          </Button>
-          <Button variant="outline" onClick={handleSync} disabled={syncing}>
-            <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
-            从合同同步
-          </Button>
-          <Button onClick={() => setShowCreate(true)}>
-            <Plus className="h-4 w-4 mr-2" />
-            新建
-          </Button>
+          {canEditPartner && (
+            <Button variant="outline" onClick={handleDedup} disabled={deduping}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${deduping ? 'animate-spin' : ''}`} />
+              去重
+            </Button>
+          )}
+          {canCreatePartner && (
+            <Button variant="outline" onClick={handleSync} disabled={syncing}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
+              从合同同步
+            </Button>
+          )}
+          {canCreatePartner && (
+            <Button onClick={() => setShowCreate(true)}>
+              <Plus className="h-4 w-4 mr-2" />
+              新建
+            </Button>
+          )}
         </div>
       </div>
 

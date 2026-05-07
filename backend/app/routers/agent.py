@@ -9,6 +9,8 @@ from app.services.agent_service import agent_service
 from app.services import file_storage
 from app.routers.contracts import _async_reparse_process
 from app.config import config
+from app.security.permissions import ensure_entity_access, require_permission
+from app.security.principal import Principal
 
 
 router = APIRouter(prefix="/agent", tags=["AI助手"])
@@ -26,7 +28,10 @@ def agent_health():
 
 
 @router.post("/chat/stream")
-def agent_chat_stream(payload: AgentChatRequest):
+def agent_chat_stream(
+    payload: AgentChatRequest,
+    principal: Principal = Depends(require_permission("agent.view")),
+):
     """SSE 流式端点：优先百炼，回退 ARK。"""
     message = (payload.message or "").strip()
     if not message:
@@ -56,7 +61,10 @@ def agent_chat_stream(payload: AgentChatRequest):
 
 
 @router.post("/probe", response_model=AgentChatResponse)
-def agent_probe(payload: AgentChatRequest):
+def agent_probe(
+    payload: AgentChatRequest,
+    principal: Principal = Depends(require_permission("agent.view")),
+):
     """联调检查：仅验证咨询链路"""
     message = (payload.message or "").strip()
     if not message:
@@ -73,7 +81,11 @@ def agent_probe(payload: AgentChatRequest):
 
 
 @router.post("/chat", response_model=AgentChatResponse)
-def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
+def agent_chat(
+    payload: AgentChatRequest,
+    principal: Principal = Depends(require_permission("agent.view")),
+    db: Session = Depends(get_db),
+):
     message = (payload.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="消息不能为空")
@@ -83,8 +95,14 @@ def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
         return AgentChatResponse(reply="我没有理解你的需求，请重试。")
 
     if op.action == "list_contracts":
+        if not principal.has_permission("contract.view"):
+            return AgentChatResponse(
+                reply="当前账号没有查看合同的权限。",
+                operation=op,
+                provider="rule",
+            )
         filters = op.filters if op.filters else {}
-        items = agent_service.list_contracts(db, limit=10, filters=filters)
+        items = agent_service.list_contracts(db, limit=10, filters=filters, principal=principal)
 
         filter_desc = ""
         if filters.get("status"):
@@ -107,20 +125,40 @@ def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
         )
 
     if op.action == "get_contract":
+        if not principal.has_permission("contract.view"):
+            return AgentChatResponse(
+                reply="当前账号没有查看合同详情的权限。",
+                operation=op,
+                provider="rule",
+            )
         if not op.contract_id:
             return AgentChatResponse(reply="请提供合同ID，例如：查看合同16。", operation=op, provider="rule")
-        item = agent_service.get_contract(db, op.contract_id)
+        item = agent_service.get_contract(db, op.contract_id, principal=principal)
         if not item:
             return AgentChatResponse(reply=f"未找到合同 {op.contract_id}。", operation=op, provider="rule")
         return AgentChatResponse(reply=f"已获取合同 {op.contract_id} 的详情。", operation=op, data=[item], provider="rule")
 
     if op.action == "delete_contract":
+        if not principal.has_permission("contract.delete"):
+            return AgentChatResponse(
+                reply="当前账号没有删除合同的权限。",
+                operation=op,
+                provider="rule",
+            )
         if not op.contract_id:
             return AgentChatResponse(reply="删除操作需要合同ID，例如：删除合同16。", operation=op, provider="rule")
 
         contract = db.query(Contract).filter(Contract.id == op.contract_id, Contract.is_deleted == False).first()
         if not contract:
             return AgentChatResponse(reply=f"未找到合同 {op.contract_id}。", operation=op, provider="rule")
+        try:
+            ensure_entity_access(contract, principal, "contract", db)
+        except HTTPException:
+            return AgentChatResponse(
+                reply=f"您没有权限删除合同 {op.contract_id}。",
+                operation=op,
+                provider="rule",
+            )
 
         if not payload.confirm:
             return AgentChatResponse(
@@ -133,12 +171,26 @@ def agent_chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
         return AgentChatResponse(reply=f"合同 {op.contract_id} 已删除。", operation=op, provider="rule")
 
     if op.action == "reparse_contract":
+        if not principal.has_permission("contract.reparse"):
+            return AgentChatResponse(
+                reply="当前账号没有重新解析合同的权限。",
+                operation=op,
+                provider="rule",
+            )
         if not op.contract_id:
             return AgentChatResponse(reply="重新解析需要合同ID，例如：重新解析合同16。", operation=op, provider="rule")
 
         contract = db.query(Contract).filter(Contract.id == op.contract_id, Contract.is_deleted == False).first()
         if not contract:
             return AgentChatResponse(reply=f"未找到合同 {op.contract_id}。", operation=op, provider="rule")
+        try:
+            ensure_entity_access(contract, principal, "contract", db)
+        except HTTPException:
+            return AgentChatResponse(
+                reply=f"您没有权限重新解析合同 {op.contract_id}。",
+                operation=op,
+                provider="rule",
+            )
 
         full_path = file_storage.get_file_path(contract.file_path)
         t = threading.Thread(target=_async_reparse_process, args=(contract.id, str(full_path)))

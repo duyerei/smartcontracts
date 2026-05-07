@@ -6,3 +6,5 @@ from .payments import router as payments_router
 from .import_contracts import router as import_contracts_router
 from .partners import router as partners_router
 from .dingtalk import router as dingtalk_router
+from .orgs import router as orgs_router
+from .roles import router as roles_router

@@ -10,7 +10,10 @@ from dateutil.relativedelta import relativedelta
 from app.database import get_db, Contract, init_db, User, ContractAttachment, Supplement
 from app.schemas import ContractResponse, ContractListResponse, ContractUpdate, UploadResponse, ExtractData
 from app.services import file_storage, contract_parser, llm_service
-from app.auth import get_current_user, verify_token
+from app.auth import get_current_principal, get_current_user, verify_token
+from app.security.bootstrap import resolve_org_unit, sync_contract_department_with_org
+from app.security.permissions import apply_data_scope, ensure_entity_access, populate_ownership_fields, require_permission
+from app.security.principal import Principal, build_principal
 
 def get_current_user_optional(
     request: Request,
@@ -27,6 +30,23 @@ router = APIRouter(prefix="/contracts", tags=["合同管理"])
 
 # LLM 返回的无效值列表
 _INVALID_LLM_VALUES = {"未提及", "未知", "无", "null", "None", "N/A", "不详", "未识别", "未找到", "暂无", ""}
+
+
+def _keep_contract_department_aligned(
+    db: Session,
+    contract: Contract,
+    *,
+    preferred_org_id: Optional[int] = None,
+    preferred_department: Optional[str] = None,
+):
+    sync_contract_department_with_org(
+        db,
+        contract,
+        preferred_org_id=preferred_org_id,
+        preferred_department=preferred_department,
+        create_missing_org=False,
+    )
+    return contract.department
 
 def _cn_amount_to_float(cn_str: str) -> Optional[float]:
     """中文大写金额转浮点数（如 陆仟元整 -> 6000.0，壹拾叁万元整 -> 130000.0）"""
@@ -351,7 +371,7 @@ def list_contracts(
     status: Optional[str] = None,
     sort_field: Optional[str] = Query(None),
     sort_order: Optional[str] = Query(None),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     # 全局查出所有补充协议关联（linked_contract_id 是子合同，不应出现在主列表中）
@@ -371,6 +391,7 @@ def list_contracts(
         Contract.is_deleted == False,
         ~Contract.id.in_(global_child_ids) if global_child_ids else True
     )
+    query = apply_data_scope(query, principal, "contract", db, Contract)
 
     if search:
         query = query.filter(
@@ -459,14 +480,20 @@ def list_contracts(
 
 @router.get("/contract-types")
 def get_contract_types(
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     """获取数据库中已有的合同类型列表（去重排序）"""
-    rows = db.query(Contract.contract_type).filter(
-        Contract.is_deleted == False,
-        Contract.contract_type != None,
-        Contract.contract_type != ""
+    rows = apply_data_scope(
+        db.query(Contract.contract_type).filter(
+            Contract.is_deleted == False,
+            Contract.contract_type != None,
+            Contract.contract_type != ""
+        ),
+        principal,
+        "contract",
+        db,
+        Contract,
     ).distinct().all()
     types = sorted(set(r[0] for r in rows if r[0]))
     return {"types": types}
@@ -474,12 +501,13 @@ def get_contract_types(
 @router.get("/{contract_id}")
 def get_contract(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     return {
         "id": contract.id,
@@ -614,10 +642,18 @@ def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
         contract.contract_number = extracted_number
         contract.title = extracted["title"]
         contract.contract_type = extracted["contract_type"]
-        contract.department = extracted["department"]
+        parsed_department = (extracted.get("department") or "").strip()
+        if parsed_department:
+            extracted["parsed_department"] = parsed_department
         contract.parties = json.dumps(extracted["parties"], ensure_ascii=False)
         contract.amount = extracted["amount"]
         contract.raw_text = raw_text
+        extracted["department"] = _keep_contract_department_aligned(
+            db,
+            contract,
+            preferred_org_id=contract.owner_org_id,
+            preferred_department=contract.department,
+        )
         contract.extracted_data = json.dumps(extracted, ensure_ascii=False)
 
         if extracted.get("signed_date"):
@@ -666,6 +702,15 @@ def _async_full_parse(contract_id: int, file_path: str, metadata_hint: str):
                         "start_date": _parser._extract_date(combined_vl, "start"),
                         "end_date": _parser._extract_date(combined_vl, "end"),
                     }
+                    parsed_department = (vl_extracted.get("department") or "").strip()
+                    if parsed_department:
+                        vl_extracted["parsed_department"] = parsed_department
+                    vl_extracted["department"] = _keep_contract_department_aligned(
+                        db,
+                        contract,
+                        preferred_org_id=contract.owner_org_id,
+                        preferred_department=contract.department,
+                    )
                     contract.raw_text = raw_text
                     contract.extracted_data = json.dumps(vl_extracted, ensure_ascii=False)
                     if vl_extracted.get("title") and vl_extracted["title"] not in ("未识别合同标题", ""):
@@ -900,7 +945,7 @@ def _async_llm_process(contract_id: int, raw_text: str):
 async def upload_contract(
     file: UploadFile = File(...),
     metadata_hint: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.create")),
     db: Session = Depends(get_db)
 ):
     try:
@@ -910,11 +955,12 @@ async def upload_contract(
         contract_number = f"CT-{datetime.now().strftime('%Y%m%d')}-{datetime.now().strftime('%H%M%S')}"
         
         # 立即创建合同记录（标记为解析中），快速返回
+        default_department = principal.primary_org.name if principal.primary_org else "其他"
         contract = Contract(
             contract_number=contract_number,
             title="解析中...",
             contract_type="其他",
-            department="其他",
+            department=default_department,
             status="待审核",
             parties="[]",
             amount=None,
@@ -924,6 +970,13 @@ async def upload_contract(
             summary="正在进行OCR识别与智能解析，请稍候...",
             raw_text="",
             extracted_data=json.dumps({"parsing": True}, ensure_ascii=False)
+        )
+        populate_ownership_fields(contract, principal, fallback_department=default_department)
+        _keep_contract_department_aligned(
+            db,
+            contract,
+            preferred_org_id=principal.primary_org.id if principal.primary_org else None,
+            preferred_department=default_department,
         )
         
         db.add(contract)
@@ -951,7 +1004,7 @@ async def upload_contract(
                 parties=[],
                 amount=None,
                 contract_type="其他",
-                department="其他",
+                department=default_department,
                 start_date=None,
                 end_date=None
             )
@@ -964,14 +1017,16 @@ async def upload_contract(
 def update_contract(
     contract_id: int,
     contract_update: ContractUpdate,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.edit")),
     db: Session = Depends(get_db)
 ):
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     update_data = contract_update.model_dump(exclude_unset=True)
+    requested_department = update_data.pop("department", None) if "department" in update_data else None
     
     if "parties" in update_data and update_data["parties"]:
         update_data["parties"] = json.dumps(update_data["parties"], ensure_ascii=False)
@@ -1000,9 +1055,32 @@ def update_contract(
             update_data["end_date"] = None
     elif "end_date" in update_data:
         update_data["end_date"] = None
+
+    if requested_department is not None:
+        normalized_department = requested_department.strip()
+        if normalized_department:
+            target_org = resolve_org_unit(db, name=normalized_department, create_missing=False)
+            if not target_org:
+                raise HTTPException(status_code=400, detail="发起部门必须与组织架构中的部门一致")
+            contract.owner_org_id = target_org.id
+            contract.department = target_org.name
+        else:
+            _keep_contract_department_aligned(
+                db,
+                contract,
+                preferred_org_id=contract.owner_org_id or (principal.primary_org.id if principal.primary_org else None),
+                preferred_department=principal.primary_org.name if principal.primary_org else contract.department,
+            )
     
     for key, value in update_data.items():
         setattr(contract, key, value)
+
+    _keep_contract_department_aligned(
+        db,
+        contract,
+        preferred_org_id=contract.owner_org_id or (principal.primary_org.id if principal.primary_org else None),
+        preferred_department=contract.department,
+    )
     
     contract.updated_at = datetime.now()
     
@@ -1017,12 +1095,13 @@ def update_contract(
 @router.delete("/{contract_id}")
 def delete_contract(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.delete")),
     db: Session = Depends(get_db)
 ):
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
     
     contract.is_deleted = True
     # 软删除时释放合同编号，避免唯一约束阻止重新上传同一份合同
@@ -1037,7 +1116,7 @@ def delete_contract(
 async def upload_contract_attachment(
     contract_id: int,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.edit")),
     db: Session = Depends(get_db)
 ):
     """为合同上传附件"""
@@ -1047,6 +1126,7 @@ async def upload_contract_attachment(
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     content = await file.read()
     file_size = len(content)
@@ -1085,13 +1165,14 @@ async def upload_contract_attachment(
 @router.get("/{contract_id}/attachments")
 def get_contract_attachments(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     """获取合同附件列表"""
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     attachments = db.query(ContractAttachment).filter(
         ContractAttachment.contract_id == contract_id,
@@ -1135,6 +1216,15 @@ def download_contract_attachment(
     if current_user is None:
         print(f"[att-download] 401 - no valid auth found")
         raise HTTPException(status_code=401, detail="未授权")
+
+    principal = build_principal(db, current_user)
+    if not principal.has_permission("contract.download"):
+        raise HTTPException(status_code=403, detail="缺少权限: contract.download")
+
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     attachment = db.query(ContractAttachment).filter(
         ContractAttachment.id == attachment_id,
@@ -1191,13 +1281,14 @@ def download_contract_attachment(
 def set_primary_attachment(
     contract_id: int,
     attachment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.edit")),
     db: Session = Depends(get_db)
 ):
     """设置主附件"""
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     # 先清除该合同所有附件的主附件标记
     db.query(ContractAttachment).filter(
@@ -1224,13 +1315,14 @@ def set_primary_attachment(
 def delete_contract_attachment(
     contract_id: int,
     attachment_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.edit")),
     db: Session = Depends(get_db)
 ):
     """删除合同附件（主附件不允许删除）"""
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     attachment = db.query(ContractAttachment).filter(
         ContractAttachment.id == attachment_id,
@@ -1271,9 +1363,14 @@ def download_contract(
     if current_user is None:
         print(f"[download] 401 - no valid auth found")
         raise HTTPException(status_code=401, detail="未授权")
+    principal = build_principal(db, current_user)
+    if not principal.has_permission("contract.download"):
+        raise HTTPException(status_code=403, detail="缺少权限: contract.download")
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
+    ensure_entity_access(contract, principal, "contract", db)
     
     # OA导入的合同没有file_path
     if not contract.file_path:
@@ -1326,12 +1423,13 @@ def download_contract(
 @router.get("/{contract_id}/analyze")
 def analyze_contract_risk(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     # 优先使用已有的raw_text，避免重复OCR
     raw_text = contract.raw_text
@@ -1379,13 +1477,14 @@ def analyze_contract_risk(
 @router.get("/{contract_id}/text")
 def get_contract_text(
     contract_id: int,
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.view")),
     db: Session = Depends(get_db)
 ):
     """获取合同文本内容，以JSON格式返回"""
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     # 优先从数据库读取，如果没有则调用OCR
     text = contract.raw_text
@@ -1582,7 +1681,15 @@ def _async_reparse_process(contract_id: int, file_path_str: str):
             print(f"[异步重解析] 使用兜底合同名称: {contract.title}")
         
         contract.contract_type = extracted.get("contract_type", contract.contract_type)
-        contract.department = extracted.get("department", contract.department)
+        parsed_department = (extracted.get("department") or "").strip()
+        if parsed_department:
+            extracted["parsed_department"] = parsed_department
+        extracted["department"] = _keep_contract_department_aligned(
+            db,
+            contract,
+            preferred_org_id=contract.owner_org_id,
+            preferred_department=contract.department,
+        )
         
         # 优先使用LLM识别的金额（兼容多种字段名）
         llm_amount_str = (
@@ -1873,13 +1980,14 @@ def _async_reparse_oa_contract(contract_id: int, attachment_file_path: str):
 def reparse_contract(
     contract_id: int,
     attachment_id: Optional[int] = Query(None, description="指定要解析的附件ID"),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.reparse")),
     db: Session = Depends(get_db)
 ):
     """重新解析合同，后台异步执行。支持普通合同和OA导入的合同。"""
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     import threading
 
@@ -2330,7 +2438,7 @@ def _generate_contract_summary_with_llm(extracted: dict, raw_text: str, llm_resu
 async def import_oa_flow_pdf(
     contract_id: int,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(require_permission("contract.edit")),
     db: Session = Depends(get_db)
 ):
     """上传OA流程表单PDF，解析后更新合同的OA流程信息字段"""
@@ -2343,6 +2451,7 @@ async def import_oa_flow_pdf(
     contract = db.query(Contract).filter(Contract.id == contract_id, Contract.is_deleted == False).first()
     if not contract:
         raise HTTPException(status_code=404, detail="合同不存在")
+    ensure_entity_access(contract, principal, "contract", db)
 
     content = await file.read()
     tmp_path = None

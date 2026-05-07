@@ -19,7 +19,6 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { 
   Table, 
   TableBody, 
@@ -29,6 +28,7 @@ import {
   TableRow 
 } from '@/components/ui/table'
 import { paymentManagementApi, PaymentRecord } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
 
 const formatDate = (dateStr?: string) => {
   if (!dateStr) return '-'
@@ -42,6 +42,7 @@ const formatDate = (dateStr?: string) => {
 }
 
 export function PaymentManagementList() {
+  const { hasPermission } = useAuth()
   const navigate = useNavigate()
   const [payments, setPayments] = useState<PaymentRecord[]>([])
   const [total, setTotal] = useState(0)
@@ -58,6 +59,7 @@ export function PaymentManagementList() {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<{ success: boolean; message: string; detail?: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const canImportPaymentPdf = hasPermission('payment.import_pdf')
 
   const fetchPayments = async () => {
     setLoading(true)
@@ -181,10 +183,12 @@ export function PaymentManagementList() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">付款管理</h1>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setShowImportDialog(true)}>
-            <Upload className="h-4 w-4 mr-2" />
-            导入付款PDF
-          </Button>
+          {canImportPaymentPdf && (
+            <Button variant="outline" onClick={() => setShowImportDialog(true)}>
+              <Upload className="h-4 w-4 mr-2" />
+              导入付款PDF
+            </Button>
+          )}
           <Button variant="outline">
             <Download className="h-4 w-4 mr-2" />
             导出

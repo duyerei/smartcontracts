@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import config
 from app.database import User, get_db
+from app.security.principal import Principal, build_principal
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -29,10 +30,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(to_encode, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
 
 
-def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> User:
+def _decode_user_from_token(token: str, db: Session) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="登录已过期，请重新登录",
@@ -52,62 +50,71 @@ def get_current_user(
     return user
 
 
+def get_current_principal(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> Principal:
+    user = _decode_user_from_token(token, db)
+    return build_principal(db, user)
+
+
+def get_current_user(
+    principal: Principal = Depends(get_current_principal),
+) -> User:
+    return principal.user
+
+
 def verify_token(token: str, db: Session) -> Optional[User]:
-    """验证token并返回用户，失败返回None（用于SSE等不能用Depends的场景）"""
     try:
-        payload = jwt.decode(token, config.JWT_SECRET_KEY, algorithms=[config.JWT_ALGORITHM])
-        username: str = payload.get("sub")
-        if not username:
-            print(f"[verify_token] token payload missing 'sub': {payload}")
-            return None
-        user = db.query(User).filter(User.username == username).first()
-        if user and user.is_active:
-            return user
-        print(f"[verify_token] user not found or inactive: username={username}")
-    except JWTError as e:
-        print(f"[verify_token] JWTError: {e}, token[:20]={token[:20]}...")
-    return None
+        user = _decode_user_from_token(token, db)
+        return user if user.is_active else None
+    except HTTPException:
+        return None
+    except JWTError as exc:
+        print(f"[verify_token] JWTError: {exc}, token[:20]={token[:20]}...")
+        return None
 
 
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-    return current_user
+def require_admin(
+    principal: Principal = Depends(get_current_principal),
+) -> User:
+    if principal.is_super_admin or principal.has_permission("user.view"):
+        return principal.user
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
 
 
 def ensure_default_admin(db: Session):
-    """启动时确保存在默认管理员账号。"""
+    admin = db.query(User).filter(User.username == "admin").first()
+    if admin:
+        return
+
     import secrets
     from pathlib import Path
-    
-    admin = db.query(User).filter(User.username == "admin").first()
-    if not admin:
-        # 生成强随机密码
-        random_password = secrets.token_urlsafe(16)
-        admin = User(
-            username="admin",
-            hashed_password=hash_password(random_password),
-            real_name="系统管理员",
-            role="admin",
-            is_active=True,
-        )
-        db.add(admin)
-        db.commit()
-        
-        # 将密码保存到安全位置
-        secure_dir = Path("./secure")
-        secure_dir.mkdir(exist_ok=True)
-        password_file = secure_dir / "admin_password.txt"
-        
-        with open(password_file, "w") as f:
-            f.write(f"管理员账号: admin\n")
-            f.write(f"初始密码: {random_password}\n")
-            f.write(f"创建时间: {datetime.now().isoformat()}\n")
-            f.write(f"\n重要提示：\n")
-            f.write(f"1. 请立即登录并修改密码\n")
-            f.write(f"2. 修改密码后请删除此文件\n")
-            f.write(f"3. 此文件包含敏感信息，请妥善保管\n")
-        
-        print(f"✅ 管理员账号已创建")
-        print(f"📁 初始密码已保存到: {password_file.absolute()}")
-        print(f"⚠️  请立即登录并修改密码！")
+
+    random_password = secrets.token_urlsafe(16)
+    admin = User(
+        username="admin",
+        hashed_password=hash_password(random_password),
+        real_name="系统管理员",
+        role="admin",
+        is_active=True,
+    )
+    db.add(admin)
+    db.commit()
+
+    secure_dir = Path("./secure")
+    secure_dir.mkdir(exist_ok=True)
+    password_file = secure_dir / "admin_password.txt"
+
+    with open(password_file, "w", encoding="utf-8") as file_obj:
+        file_obj.write("管理员账号: admin\n")
+        file_obj.write(f"初始密码: {random_password}\n")
+        file_obj.write(f"创建时间: {datetime.now().isoformat()}\n")
+        file_obj.write("\n重要提示：\n")
+        file_obj.write("1. 请立即登录并修改密码\n")
+        file_obj.write("2. 修改密码后请删除此文件\n")
+        file_obj.write("3. 此文件包含敏感信息，请妥善保管\n")
+
+    print("✅ 管理员账号已创建")
+    print(f"📁 初始密码已保存到: {password_file.absolute()}")
+    print("⚠️  请立即登录并修改密码！")

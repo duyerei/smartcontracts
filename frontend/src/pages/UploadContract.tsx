@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Upload,
@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { contractApi, paymentManagementApi } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
 
 // ─── 合同上传 ────────────────────────────────────────────────────────────────
 
@@ -380,14 +381,23 @@ function OAImportTab() {
 
 type TabKey = 'contract' | 'payment' | 'oa'
 
-const tabs: { key: TabKey; label: string; icon: React.ReactNode; desc: string }[] = [
-  { key: 'contract', label: '合同导入', icon: <FileText className="h-4 w-4" />, desc: '上传PDF，AI自动解析' },
-  { key: 'payment', label: '付款单导入', icon: <CreditCard className="h-4 w-4" />, desc: '上传OA付款申请PDF' },
-  { key: 'oa', label: 'OA批量导入', icon: <Download className="h-4 w-4" />, desc: '从OA系统批量导入' },
+const tabs: { key: TabKey; label: string; icon: React.ReactNode; desc: string; permission: string }[] = [
+  { key: 'contract', label: '合同导入', icon: <FileText className="h-4 w-4" />, desc: '上传PDF，AI自动解析', permission: 'contract.create' },
+  { key: 'payment', label: '付款单导入', icon: <CreditCard className="h-4 w-4" />, desc: '上传OA付款申请PDF', permission: 'payment.import_pdf' },
+  { key: 'oa', label: 'OA批量导入', icon: <Download className="h-4 w-4" />, desc: '从OA系统批量导入', permission: 'contract.import_oa' },
 ]
 
 export function UploadContract() {
+  const { hasPermission } = useAuth()
   const [activeTab, setActiveTab] = useState<TabKey>('contract')
+  const accessibleTabs = tabs.filter((tab) => hasPermission(tab.permission))
+
+  useEffect(() => {
+    if (!accessibleTabs.length) return
+    if (!accessibleTabs.some((tab) => tab.key === activeTab)) {
+      setActiveTab(accessibleTabs[0].key)
+    }
+  }, [accessibleTabs, activeTab])
 
   return (
     <div className="space-y-6">
@@ -397,8 +407,17 @@ export function UploadContract() {
       </div>
 
       {/* Tab 导航 */}
-      <div className="grid grid-cols-3 gap-3">
-        {tabs.map(tab => (
+      <div
+        className={cn(
+          "grid gap-3",
+          accessibleTabs.length <= 1
+            ? "grid-cols-1"
+            : accessibleTabs.length === 2
+              ? "grid-cols-1 md:grid-cols-2"
+              : "grid-cols-1 md:grid-cols-3"
+        )}
+      >
+        {accessibleTabs.map(tab => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
@@ -420,9 +439,9 @@ export function UploadContract() {
         ))}
       </div>
 
-      {activeTab === 'contract' && <ContractUploadTab />}
-      {activeTab === 'payment' && <PaymentImportTab />}
-      {activeTab === 'oa' && <OAImportTab />}
+      {activeTab === 'contract' && hasPermission('contract.create') && <ContractUploadTab />}
+      {activeTab === 'payment' && hasPermission('payment.import_pdf') && <PaymentImportTab />}
+      {activeTab === 'oa' && hasPermission('contract.import_oa') && <OAImportTab />}
     </div>
   )
 }
