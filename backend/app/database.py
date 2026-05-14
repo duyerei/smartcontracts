@@ -5,14 +5,12 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from app.config import config
+from app.db_config import build_engine_options, is_sqlite, normalize_database_url
 
-engine = create_engine(
-    config.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in config.DATABASE_URL else {},
-    pool_pre_ping=True,
-)
+DATABASE_URL = normalize_database_url(config.DATABASE_URL)
+engine = create_engine(DATABASE_URL, **build_engine_options(DATABASE_URL))
 
-if "sqlite" in config.DATABASE_URL:
+if is_sqlite(DATABASE_URL):
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_conn, connection_record):
@@ -317,7 +315,7 @@ def _ensure_sqlite_schema():
 
 def init_db():
     Base.metadata.create_all(bind=engine)
-    if "sqlite" in config.DATABASE_URL:
+    if is_sqlite(DATABASE_URL):
         _ensure_sqlite_schema()
 
 

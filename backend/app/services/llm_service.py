@@ -15,7 +15,7 @@ class LLMService:
         # 合同解析用的APP_ID（优先使用专用的，回退到通用的）
         self.app_id = config.DASHSCOPE_CONTRACT_APP_ID or config.DASHSCOPE_APP_ID
         if self.api_key:
-            print(f"百炼配置: API_KEY={self.api_key[:20]}..., APP_ID={self.app_id or 'None'}")
+            print(f"百炼配置: API_KEY=已配置, APP_ID={self.app_id or 'None'}")
         else:
             print("百炼API Key未配置，LLM解析不可用")
 

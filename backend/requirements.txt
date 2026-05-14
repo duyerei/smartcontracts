@@ -1,6 +1,8 @@
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 sqlalchemy>=2.0.25
+psycopg[binary]>=3.1.18
+pymysql>=1.1.0
 pydantic>=2.7.0
 python-multipart>=0.0.9
 requests>=2.31.0

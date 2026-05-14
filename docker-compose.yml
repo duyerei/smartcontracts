@@ -16,7 +16,7 @@ services:
     env_file:
       - ./backend/.env.production
     environment:
-      - DATABASE_URL=sqlite:////app/data/contracts.db
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////app/data/contracts.db}
       - STORAGE_PATH=/app/storage
       - ENVIRONMENT=production
     healthcheck:

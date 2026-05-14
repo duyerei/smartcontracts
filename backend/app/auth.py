@@ -115,6 +115,6 @@ def ensure_default_admin(db: Session):
         file_obj.write("2. 修改密码后请删除此文件\n")
         file_obj.write("3. 此文件包含敏感信息，请妥善保管\n")
 
-    print("✅ 管理员账号已创建")
-    print(f"📁 初始密码已保存到: {password_file.absolute()}")
-    print("⚠️  请立即登录并修改密码！")
+    print("[初始化] 管理员账号已创建")
+    print(f"[初始化] 初始密码已保存到: {password_file.absolute()}")
+    print("[初始化] 请立即登录并修改密码")
