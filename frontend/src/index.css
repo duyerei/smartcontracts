@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* AI解析动画效果 */
+.ai-analyzing-card {
+  position: relative;
+  overflow: hidden; /* 重要：裁剪超出部分，避免旋转元素超出边界 */
+  z-index: 0;
+}
+
+/* 激活解析状态时的旋转边框动效 */
+.ai-analyzing-card.is-loading::before {
+  content: "";
+  position: absolute;
+  inset: -2px; /* 略大于容器，形成边框感 */
+  z-index: -1;
+  border-radius: calc(var(--radius) + 2px);
+  /* 圆锥渐变形成流光效果 */
+  background: conic-gradient(
+    from 0deg,
+    transparent 0%,
+    transparent 70%,
+    hsl(var(--primary)) 90%,
+    hsl(221.2 83.2% 70%) 100%
+  );
+  animation: ai-border-rotate 2s linear infinite;
+}
+
+/* 利用 mask 遮罩只保留边框部分 */
+.ai-analyzing-card.is-loading::after {
+  content: "";
+  position: absolute;
+  inset: 1px; /* 露出1px的边框 */
+  background: hsl(var(--card));
+  border-radius: var(--radius);
+  z-index: -1;
+}
+
+/* 旋转动画 */
+@keyframes ai-border-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 呼吸发光动画 */
+@keyframes ai-glow-pulse {
+  0%, 100% { 
+    box-shadow: 0 0 10px hsla(var(--primary) / 0.1),
+                0 0 20px hsla(var(--primary) / 0.05);
+  }
+  50% { 
+    box-shadow: 0 0 20px hsla(var(--primary) / 0.3),
+                0 0 40px hsla(var(--primary) / 0.15);
+  }
+}
+
+/* 外发光呼吸效果 */
+.ai-analyzing-card.is-loading {
+  animation: ai-glow-pulse 2s ease-in-out infinite;
+  border-color: transparent; /* 隐藏原边框 */
+  transition: all 0.3s;
+}
+
+/* docx-preview custom styles */
+.docx-preview-wrapper {
+  background-color: transparent !important;
+}
+
+.docx-preview-container {
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+  margin: 0 auto !important;
+  background-color: white !important;
+  border-radius: 4px !important;
+}
+
+.docx-wrapper {
+  background-color: transparent !important;
+  padding: 0 !important;
+}
+
+.docx {
+  margin-bottom: 0 !important;
+}

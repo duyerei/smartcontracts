@@ -1,0 +1,14 @@
+# 基础镜像：包含 LibreOffice 和系统依赖
+# 构建命令（在服务器上执行一次）：
+#   docker build -t contract-base:latest -f Dockerfile.base .
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer \
+    libreoffice-calc \
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
+    poppler-utils \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*

@@ -1,0 +1,10 @@
+node_modules
+*.md
+!README.md
+.env
+.env.local
+test-*
+tsconfig.tsbuildinfo
+tsconfig.node.tsbuildinfo
+vite.config.d.ts
+vite.config.js
